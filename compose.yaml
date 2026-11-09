@@ -1,0 +1,21 @@
+# Local MongoDB for mqlc. Root credentials are for restore only; mqlc itself
+# connects as the read-only `mqlc` user created by docker/mongo-init.
+services:
+  mongo:
+    image: mongo:8.2
+    ports:
+      - "127.0.0.1:27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo-init:/docker-entrypoint-initdb.d:ro
+      - ./data/AptMQL-Bench:/bench:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 20
+
+volumes:
+  mongo-data:

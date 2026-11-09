@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Chen-Yuan-Lai/mqlc"
+
+[workspace.dependencies]
+mqlc-core = { path = "crates/mqlc-core" }
