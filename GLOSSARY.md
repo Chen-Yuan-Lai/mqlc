@@ -38,8 +38,15 @@ _Avoid_：知識組、variant、condition
 _Avoid_：attempt、prediction
 
 **Soft-EX**：
-官方評分腳本的執行正確率：預測結果與 gold pipeline 結果的欄位依值配對（不看欄位名），允許預測多出欄位，數值容許誤差。本專案所有分數都以它為準。
+官方評分腳本的執行正確率：預測結果與 gold pipeline 結果的欄位依值配對（不看欄位名），允許預測多出欄位，數值容許誤差。本專案的主要分數。
 _Avoid_：accuracy、EX
+
+**Strict-EX**：
+與 Soft-EX 相同的比對，但預測不能多出欄位。論文與 Soft-EX 並列報告。
+
+**Exec-Rate**：
+預測能被解析且執行時沒有錯誤的比例，不論結果對錯。
+_Avoid_：executable rate、valid rate
 
 **Leakage（洩漏）**：
 任何依 dev split 內容做的調整：prompt 迭代、人工 MDL、IR 範圍。dev 只用來報分數。

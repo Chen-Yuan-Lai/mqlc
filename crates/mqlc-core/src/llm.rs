@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmRequest {
     pub system: String,
+    /// Start of the user turn shared by many requests (the schema block);
+    /// backends that support prompt caching cache up to here.
+    pub context: String,
     pub user: String,
     pub max_tokens: u32,
     pub temperature: f32,
@@ -27,6 +30,8 @@ pub struct Usage {
 pub struct LlmResponse {
     pub text: String,
     pub usage: Usage,
+    /// The reply stopped at `max_tokens`.
+    pub truncated: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,13 +40,14 @@ pub enum LlmError {
     Http(#[from] reqwest::Error),
     #[error("API returned {status}: {body}")]
     Api { status: u16, body: String },
-    #[error("reply was cut off at max_tokens ({0})")]
-    Truncated(u32),
     #[error("{0}")]
     Other(String),
 }
 
 pub trait LlmClient: Send + Sync {
+    /// The model id, as recorded in results and manifests.
+    fn model(&self) -> &str;
+
     fn complete(
         &self,
         request: &LlmRequest,
@@ -85,13 +91,31 @@ struct ContentBlock {
 }
 
 impl LlmClient for AnthropicClient {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "system": request.system,
-            "messages": [{ "role": "user", "content": request.user }],
+            "system": [{
+                "type": "text",
+                "text": request.system,
+                "cache_control": { "type": "ephemeral" },
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": request.context,
+                        "cache_control": { "type": "ephemeral" },
+                    },
+                    { "type": "text", "text": request.user },
+                ],
+            }],
         });
         let resp = self
             .http
@@ -109,12 +133,10 @@ impl LlmClient for AnthropicClient {
             });
         }
         let parsed: MessagesResponse = resp.json().await?;
-        if parsed.stop_reason.as_deref() == Some("max_tokens") {
-            return Err(LlmError::Truncated(request.max_tokens));
-        }
         Ok(LlmResponse {
             text: parsed.content.into_iter().map(|b| b.text).collect(),
             usage: parsed.usage,
+            truncated: parsed.stop_reason.as_deref() == Some("max_tokens"),
         })
     }
 }

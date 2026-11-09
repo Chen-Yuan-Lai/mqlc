@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const DATA_FILE: &str = "aptmqlbench_data.jsonl";
 const PROMPT_FILE: &str = "prompts/s51_text2mql_1time_completion.txt";
@@ -62,6 +63,7 @@ pub struct OfficialPrompt {
     schema: String,
     question: String,
     evidence: String,
+    hash: String,
 }
 
 impl OfficialPrompt {
@@ -76,21 +78,34 @@ impl OfficialPrompt {
             schema: template("SCHEMA_PROMPT")?,
             question: template("QUESTION_PROMPT")?,
             evidence: template("EVIDENCE_SECTION")?,
+            hash: Sha256::digest(text.as_bytes())
+                .iter()
+                .fold("sha256:".to_string(), |mut h, b| {
+                    h.push_str(&format!("{b:02x}"));
+                    h
+                }),
         })
     }
 
-    /// The user turn: schema block, then the question, with the evidence block
-    /// only when `evidence` is given.
-    pub fn user_message(&self, schema: &str, question: &str, evidence: Option<&str>) -> String {
+    /// The schema block: the part of the user turn shared by every question on
+    /// one database, and so the part worth caching.
+    pub fn schema_block(&self, schema: &str) -> String {
+        self.schema.replace("{schema_description}", schema)
+    }
+
+    /// The question block, with the evidence block only when `evidence` is given.
+    pub fn question_block(&self, question: &str, evidence: Option<&str>) -> String {
         let evidence = evidence
             .map(|e| self.evidence.replace("{mongodb_evidence}", e))
             .unwrap_or_default();
-        let schema = self.schema.replace("{schema_description}", schema);
-        let question = self
-            .question
+        self.question
             .replace("{nl_request}", question)
-            .replace("{evidence_section}", &evidence);
-        format!("{schema}\n\n{question}")
+            .replace("{evidence_section}", &evidence)
+    }
+
+    /// Hash of the whole prompt file, recorded in run manifests.
+    pub fn hash(&self) -> &str {
+        &self.hash
     }
 }
 

@@ -2,7 +2,7 @@ mod support;
 
 use mongodb::bson::{DateTime, doc};
 use mqlc_core::testing::ScriptedLlm;
-use mqlc_core::{AskError, Dataset, Engine};
+use mqlc_core::{AnswerError, Dataset, Engine, Query};
 use support::{dataset_dir, mongo_with, reply};
 
 #[tokio::test]
@@ -27,15 +27,17 @@ async fn answers_a_question_with_collection_pipeline_and_rows() {
     let sample = engine.dataset().sample("dev_7").unwrap().clone();
     let answer = engine.ask(&sample).await.unwrap();
 
-    assert_eq!(answer.collection, "animals");
     assert_eq!(
-        answer.pipeline,
-        vec![
-            doc! { "$match": { "species": "cat" } },
-            doc! { "$count": "count" }
-        ]
+        answer.query,
+        Some(Query {
+            collection: "animals".to_string(),
+            pipeline: vec![
+                doc! { "$match": { "species": "cat" } },
+                doc! { "$count": "count" }
+            ],
+        })
     );
-    assert_eq!(answer.rows, vec![doc! { "count": 2 }]);
+    assert_eq!(answer.rows.unwrap(), vec![doc! { "count": 2 }]);
 }
 
 #[tokio::test]
@@ -60,10 +62,10 @@ async fn sends_the_official_prompt_with_schema_and_question_but_no_evidence() {
         "# ROLE\nYou are an expert MongoDB engineer."
     );
     assert_eq!(request.temperature, 0.0);
-    assert!(request.user.starts_with(
+    assert!(request.context.starts_with(
         "<MongoDB Schema Description>\n\nCollection: animals\n{\"field_name\": \"name\""
     ));
-    assert!(request.user.contains(
+    assert!(request.user.starts_with(
         "<Natural Language Request>\nHow many cats are there?\n</Natural Language Request>"
     ));
     assert!(!request.user.contains("Evidence"));
@@ -96,7 +98,7 @@ async fn accepts_python_literals_and_extended_json_dates() {
     let sample = engine.dataset().sample("dev_7").unwrap().clone();
     let answer = engine.ask(&sample).await.unwrap();
 
-    assert_eq!(answer.rows, vec![doc! { "name": "Tom" }]);
+    assert_eq!(answer.rows.unwrap(), vec![doc! { "name": "Tom" }]);
 }
 
 #[tokio::test]
@@ -115,9 +117,9 @@ async fn refuses_pipelines_that_write() {
     let sample = engine.dataset().sample("dev_7").unwrap().clone();
 
     for stage in ["$out", "$merge"] {
-        let err = engine.ask(&sample).await.unwrap_err();
+        let err = engine.ask(&sample).await.unwrap().rows.unwrap_err();
         assert!(
-            matches!(&err, AskError::WriteStage(s) if s == stage),
+            matches!(&err, AnswerError::WriteStage(s) if s == stage),
             "{err}"
         );
     }

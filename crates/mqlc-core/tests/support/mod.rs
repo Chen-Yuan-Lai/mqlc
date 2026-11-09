@@ -36,7 +36,10 @@ EVIDENCE_SECTION = """
 {mongodb_evidence}
 </Evidence>""""#;
 
-const SAMPLE: &str = r#"{"split": "dev", "db_id": "pets", "question": "How many cats are there?", "evidence": "", "mongodb_evidence": "cats refers to species = 'cat'", "question_id": 7, "sample_id": "dev_7", "SQL": "SELECT COUNT(*) FROM pets WHERE species = 'cat'", "MQL": {"collection": "animals", "aggregation_pipeline": [{"$match": {"species": "cat"}}, {"$count": "count"}]}}"#;
+const SAMPLES: [&str; 2] = [
+    r#"{"split": "dev", "db_id": "pets", "question": "How many cats are there?", "evidence": "", "mongodb_evidence": "cats refers to species = 'cat'", "question_id": 7, "sample_id": "dev_7", "SQL": "SELECT COUNT(*) FROM pets WHERE species = 'cat'", "MQL": {"collection": "animals", "aggregation_pipeline": [{"$match": {"species": "cat"}}, {"$count": "count"}]}}"#,
+    r#"{"split": "dev", "db_id": "pets", "question": "How many dogs are there?", "evidence": "", "mongodb_evidence": "dogs refers to species = 'dog'", "question_id": 8, "sample_id": "dev_8", "SQL": "SELECT COUNT(*) FROM pets WHERE species = 'dog'", "MQL": {"collection": "animals", "aggregation_pipeline": [{"$match": {"species": "dog"}}, {"$count": "count"}]}}"#,
+];
 
 const DESCRIPTION: &str = r#"{"field_name": "name", "field_description": "Pet name", "data_type": "String", "required": true, "value_description": ""}
 {"field_name": "species", "field_description": "Kind of animal", "data_type": "String", "required": true, "value_description": "cat, dog"}"#;
@@ -45,7 +48,11 @@ const DESCRIPTION: &str = r#"{"field_name": "name", "field_description": "Pet na
 pub fn dataset_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::write(root.join("aptmqlbench_data.jsonl"), format!("{SAMPLE}\n")).unwrap();
+    fs::write(
+        root.join("aptmqlbench_data.jsonl"),
+        SAMPLES.join("\n") + "\n",
+    )
+    .unwrap();
     write(
         root,
         "prompts/s51_text2mql_1time_completion.txt",

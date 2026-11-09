@@ -19,3 +19,15 @@ jobs:
       # Integration tests start mongo:8.2 through testcontainers (Docker is
       # available on GitHub-hosted Ubuntu runners).
       - run: cargo test --all-targets
+
+  scoring:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scoring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # Starts mongo:8.2 through testcontainers and downloads the pinned
+      # official eval_script.py.
+      - run: uv run pytest -q
