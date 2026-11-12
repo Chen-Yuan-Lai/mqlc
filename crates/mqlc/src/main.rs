@@ -103,6 +103,9 @@ impl SplitArg {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `.env` (gitignored) may hold ANTHROPIC_API_KEY and MQLC_* settings;
+    // variables already set in the environment win.
+    dotenvy::dotenv().ok();
     let cli = Cli::parse();
     let dataset = Dataset::open(&cli.data_dir)
         .with_context(|| format!("opening dataset at {}", cli.data_dir.display()))?;

@@ -38,11 +38,16 @@ development; do not expose this container.
 
 ### 2. Anthropic API key
 
+Put it in a `.env` file at the repository root (gitignored), which `mqlc`
+reads at startup:
+
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+chmod 600 .env
 ```
 
-Put it in your shell profile, never in the repo.
+A variable already set in the environment wins over `.env`. Never commit the
+key.
 
 ## Usage
 
