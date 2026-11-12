@@ -1,3 +1,5 @@
 # Typed IR 在生成之後才解析，不做 constrained decoding
 
 模型照常輸出 Extended JSON pipeline，mqlc 事後把它解析成 typed IR 再做 static check；不用 grammar 或 JSON schema 限制模型的輸出。Constrained decoding 綁定特定後端（各後端支援程度不一，Anthropic API 只支援 JSON schema 而非任意 grammar，pipeline 的 operator 組合也難以用 JSON schema 完整描述），而且 IR 只要漏掉一個 operator，模型就完全寫不出正確答案。事後解析則讓 IR 可以不完整：無法表示的部分保留成 raw stage、照常執行，只是不檢查。IR 的範圍以 train split 的 IR coverage ≥95% 為目標，並以 3,186 條 gold pipeline 的 round-trip 測試守住「序列化回去語意不變」。
+
+IR 支援的 operator 就是 train split 的 gold pipeline 用到的全部 operator，不多也不少：dev 才出現的 operator（例如 `$substr`、`$objectToArray`）留在 raw stage，由 `mqlc ir-coverage` 列出，不依 dev 補上（ADR 0006）。一個 stage 只要有一處無法表示，整個 stage 就保留成 raw stage；巢狀 pipeline（`$lookup`、`$facet`、`$unionWith`）裡的 raw stage 不影響外層。Round-trip 的「語意不變」定義為：序列化回去的 BSON 值與型別完全相同（`Int32` 與 `Int64` 不同），key 順序也相同，只有 stage 選項文件（`$lookup`、`$unwind`、`$unionWith`、`$replaceRoot`、`$setWindowFields` 的參數）例外，MongoDB 不看這些 key 的順序，IR 也以固定順序輸出。Extended JSON 以 relaxed 格式輸出，但 64 位元整數一律寫成 `$numberLong`，否則讀回來會變成 32 位元。

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mqlc_core::mongodb::bson::{Bson, Document};
 use mqlc_core::{
-    AnswerError, AnthropicClient, Dataset, Engine, LlmClient, OpenAiClient, Sample, bench,
+    AnswerError, AnthropicClient, Dataset, Engine, LlmClient, OpenAiClient, Sample, bench, ir,
 };
 
 #[derive(Parser)]
@@ -110,6 +110,9 @@ enum Command {
         #[arg(long, default_value_t = 80.0)]
         spend_limit: f64,
     },
+    /// Report, per split, how many gold pipelines the IR represents without a
+    /// raw stage, and what the rest need. Calls no LLM and no database.
+    IrCoverage,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -146,6 +149,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dataset = Dataset::open(&cli.data_dir)
         .with_context(|| format!("opening dataset at {}", cli.data_dir.display()))?;
+    if let Command::IrCoverage = cli.command {
+        print!("{}", ir::Coverage::of(dataset.samples())?);
+        return Ok(());
+    }
     let mongo = mqlc_core::mongodb::Client::with_uri_str(&cli.mongo_uri).await?;
     match cli.backend {
         BackendArg::Anthropic => {
@@ -284,6 +291,7 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 std::process::exit(2);
             }
         }
+        Command::IrCoverage => unreachable!("handled before connecting"),
     }
     Ok(())
 }

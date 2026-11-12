@@ -14,6 +14,14 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      # The IR round-trip and coverage tests read every gold pipeline. The
+      # pinned revision lives in fetch-data.sh, so its hash keys the cache.
+      - uses: actions/cache@v4
+        with:
+          path: data/AptMQL-Bench
+          key: aptmqlbench-${{ hashFiles('scripts/fetch-data.sh') }}
+      - run: scripts/fetch-data.sh aptmqlbench_data.jsonl prompts/s51_text2mql_1time_completion.txt
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       # Integration tests start mongo:8.2 through testcontainers (Docker is

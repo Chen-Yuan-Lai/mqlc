@@ -5,6 +5,7 @@ pub use mongodb;
 pub mod bench;
 pub mod dataset;
 pub mod engine;
+pub mod ir;
 pub mod llm;
 mod pricing;
 mod reply;

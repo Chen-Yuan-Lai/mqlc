@@ -145,6 +145,25 @@ results with the official `eval_script.py`, writing `scores.jsonl` and
 - **Strict-EX**: the same without extra columns
 - **Exec-Rate**: predictions that parsed and executed without error
 
+### IR coverage
+
+```bash
+cargo run -p mqlc -- ir-coverage
+```
+
+mqlc parses each pipeline into a typed IR (ADR 0003); a stage it cannot
+represent is kept as written, as a raw stage. `ir-coverage` reports, per
+split, how many gold pipelines need no raw stage, and the most common
+constructs the rest need. The supported operators are exactly those the train
+split uses, so train is fully covered:
+
+| split | samples | covered | coverage |
+|-------|--------:|--------:|---------:|
+| train | 1,762 | 1,762 | 100.0% |
+| dev | 1,424 | 1,376 | 96.6% |
+
+The dev gaps are led by `$substr` (16 samples) and `$objectToArray` (14).
+
 ## Tests
 
 ```bash
@@ -153,7 +172,9 @@ cargo test
 
 Integration tests start a throwaway `mongo:8.2` through testcontainers, so
 Docker must be running. The LLM is replaced by a scripted fake; nothing else
-is mocked. The scorer has its own test:
+is mocked. The IR tests need no database but read every gold pipeline, so
+they need at least `scripts/fetch-data.sh aptmqlbench_data.jsonl
+prompts/s51_text2mql_1time_completion.txt`. The scorer has its own test:
 
 ```bash
 cd scoring && uv run pytest
