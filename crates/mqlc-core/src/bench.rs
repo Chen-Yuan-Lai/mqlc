@@ -233,7 +233,8 @@ pub async fn run<L: LlmClient>(
             skipped: 0,
             remaining: 0,
             stopped: None,
-            cost_usd: earlier.iter().filter_map(|r| r.cost_usd).sum(),
+            // `0.0 +`: an empty f64 sum is -0.0.
+            cost_usd: 0.0 + earlier.iter().filter_map(|r| r.cost_usd).sum::<f64>(),
             unpriced: earlier.iter().filter(|r| r.cost_usd.is_none()).count(),
             pending_batch: None,
         },
@@ -430,7 +431,13 @@ impl<F: FnMut(Progress)> Recorder<F> {
             usage: answer.usage,
             latency_ms: answer.latency.map(|l| l.as_millis() as u64),
             batch,
-            cost_usd: pricing::cost_usd(&self.model, &answer.usage, batch),
+            // Nothing used costs nothing, priced model or not (a prompt that
+            // was never sent).
+            cost_usd: if answer.usage == Usage::default() {
+                Some(0.0)
+            } else {
+                pricing::cost_usd(&self.model, &answer.usage, batch)
+            },
             reply: answer.reply,
         };
         // One write per line, flushed, so a kill loses at most the line in flight.

@@ -254,9 +254,11 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                     seen += 1;
                     let status = r.error.as_ref().map_or("ok", |e| e.kind.as_str());
                     let cost = r.cost_usd.map_or("?".to_string(), |c| format!("${c:.4}"));
-                    let latency = r
-                        .latency_ms
-                        .map_or("batch".to_string(), |ms| format!("{ms} ms"));
+                    let latency = match (r.latency_ms, r.batch) {
+                        (Some(ms), _) => format!("{ms} ms"),
+                        (None, true) => "batch".to_string(),
+                        (None, false) => "not sent".to_string(),
+                    };
                     eprintln!(
                         "[{seen}] {} {:<24} {:<11} {cost:>8}  {latency}",
                         r.sample_id, r.db_id, status
