@@ -19,10 +19,12 @@ fn price(model: &str) -> Option<Price> {
     Some(Price { input, output })
 }
 
-/// Cost of one call, or `None` for models without a known price.
-pub fn cost_usd(model: &str, usage: &Usage) -> Option<f64> {
+/// Cost of one call, or `None` for models without a known price. Batch
+/// requests cost half, cache multipliers included.
+pub fn cost_usd(model: &str, usage: &Usage, batch: bool) -> Option<f64> {
     let p = price(model)?;
-    let tokens = |n: u64, per_million: f64| n as f64 * per_million / 1e6;
+    let discount = if batch { 0.5 } else { 1.0 };
+    let tokens = |n: u64, per_million: f64| n as f64 * per_million * discount / 1e6;
     Some(
         tokens(usage.input_tokens, p.input)
             + tokens(usage.cache_creation_input_tokens, p.input * 1.25)

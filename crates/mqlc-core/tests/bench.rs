@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use mongodb::bson::doc;
-use mqlc_core::bench::{self, Record};
+use mqlc_core::bench::{self, Mode, Options, Progress, Record};
 use mqlc_core::testing::{Scripted, ScriptedLlm};
 use mqlc_core::{Dataset, Engine, Usage};
 use support::{dataset_dir, mongo_with, reply};
@@ -40,9 +40,15 @@ async fn records_every_sample_including_ones_whose_reply_cannot_be_parsed() {
     let run_dir = tempfile::tempdir().unwrap();
     let samples = engine.dataset().samples().to_vec();
 
-    let summary = bench::run(&engine, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap();
+    let summary = bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
 
     assert_eq!(summary.completed, 2);
     assert!(summary.stopped.is_none());
@@ -82,9 +88,15 @@ async fn a_rerun_after_an_interruption_only_answers_the_missing_samples() {
         Dataset::open(data.path()).unwrap(),
     );
     let samples = first.dataset().samples().to_vec();
-    let summary = bench::run(&first, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap();
+    let summary = bench::run(
+        &first,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert_eq!(summary.completed, 1);
     assert!(summary.stopped.is_some());
 
@@ -99,9 +111,15 @@ async fn a_rerun_after_an_interruption_only_answers_the_missing_samples() {
         mongo.client.clone(),
         Dataset::open(data.path()).unwrap(),
     );
-    let summary = bench::run(&second, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap();
+    let summary = bench::run(
+        &second,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
 
     assert_eq!((summary.completed, summary.skipped), (1, 1));
     assert!(summary.stopped.is_none());
@@ -143,9 +161,15 @@ async fn writes_a_manifest_and_tracks_cost_and_refuses_to_mix_configurations() {
     );
     let samples = engine.dataset().samples().to_vec();
 
-    let summary = bench::run(&engine, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap();
+    let summary = bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
 
     // Haiku 4.5: $1/M input, $5/M output, cache reads at $0.10/M.
     let per_call = 0.001 + 0.0005 + 0.0002;
@@ -181,9 +205,15 @@ async fn writes_a_manifest_and_tracks_cost_and_refuses_to_mix_configurations() {
         mongo.client.clone(),
         Dataset::open(data.path()).unwrap(),
     );
-    let err = bench::run(&other, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap_err();
+    let err = bench::run(
+        &other,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(err, bench::BenchError::ConfigMismatch { .. }),
         "{err}"
@@ -206,9 +236,15 @@ async fn a_reply_cut_off_at_max_tokens_is_recorded_and_the_run_goes_on() {
     let run_dir = tempfile::tempdir().unwrap();
     let samples = engine.dataset().samples().to_vec();
 
-    let summary = bench::run(&engine, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap();
+    let summary = bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
 
     assert_eq!((summary.completed, summary.stopped), (2, None));
     let kinds: Vec<_> = records(run_dir.path())
@@ -232,11 +268,344 @@ async fn an_unreachable_database_stops_the_run_instead_of_failing_every_answer()
     let run_dir = tempfile::tempdir().unwrap();
     let samples = engine.dataset().samples().to_vec();
 
-    let summary = bench::run(&engine, run_dir.path(), &samples, |_| {})
-        .await
-        .unwrap();
+    let summary = bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
 
     assert_eq!(summary.completed, 0);
     assert!(summary.stopped.unwrap().contains("database"));
     assert!(records(run_dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn a_batch_submitted_before_an_interruption_is_collected_on_rerun_without_resubmitting() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![
+        doc! { "name": "Tom", "species": "cat" },
+        doc! { "name": "Rex", "species": "dog" },
+    ])
+    .await;
+    let runs = tempfile::tempdir().unwrap();
+    let run_dir = runs.path().join("batch");
+    let usage = Usage {
+        input_tokens: 1000,
+        output_tokens: 100,
+        cache_read_input_tokens: 2000,
+        cache_creation_input_tokens: 0,
+    };
+    // One fake API shared by every invocation, as the real batch outlives them.
+    let api = ScriptedLlm::new([
+        reply(
+            "animals",
+            r#"[{"$match": {"species": "cat"}}, {"$count": "n"}]"#,
+        ),
+        reply(
+            "animals",
+            r#"[{"$match": {"species": "dog"}}, {"$count": "n"}]"#,
+        ),
+    ])
+    .with_model("claude-haiku-4-5")
+    .with_usage(usage);
+    let engine = || {
+        Engine::new(
+            api.clone(),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+    };
+    let samples = engine().dataset().samples().to_vec();
+    let batch = Options {
+        mode: Mode::Batch,
+        ..Options::default()
+    };
+
+    let submitted = bench::run(&engine(), &run_dir, &samples, &batch, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(submitted.completed, 0);
+    assert!(submitted.pending_batch.is_some());
+
+    // Interrupted while the batch is still processing: the rerun waits on it.
+    let waiting = bench::run(&engine(), &run_dir, &samples, &batch, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(waiting.pending_batch, submitted.pending_batch);
+
+    api.finish_batches();
+    let collected = bench::run(&engine(), &run_dir, &samples, &batch, |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(collected.completed, 2);
+    assert_eq!(collected.pending_batch, None);
+    assert_eq!(api.batches().len(), 1, "the batch was submitted once");
+    assert_eq!(api.batches()[0].len(), 2);
+    assert!(api.requests().is_empty(), "nothing was asked synchronously");
+    // Haiku 4.5 at the 50% batch discount: $0.50/M input, $2.50/M output,
+    // cache reads at $0.05/M.
+    let per_call = 0.0005 + 0.00025 + 0.0001;
+    let records = records(&run_dir);
+    let rows: Vec<_> = records
+        .iter()
+        .map(|r| (r.sample_id.as_str(), r.row_count, r.batch))
+        .collect();
+    assert_eq!(rows, [("dev_7", Some(1), true), ("dev_8", Some(1), true)]);
+    for record in &records {
+        assert!((record.cost_usd.unwrap() - per_call).abs() < 1e-12);
+        assert_eq!(record.latency_ms, None);
+    }
+}
+
+#[tokio::test]
+async fn batch_requests_that_got_no_answer_stop_the_run_unrecorded_and_are_resubmitted_on_rerun() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let runs = tempfile::tempdir().unwrap();
+    let run_dir = runs.path().join("batch");
+    // One reply for two requests: the second request expires.
+    let api = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = || {
+        Engine::new(
+            api.clone(),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+    };
+    let samples = engine().dataset().samples().to_vec();
+    let batch = Options {
+        mode: Mode::Batch,
+        ..Options::default()
+    };
+    bench::run(&engine(), &run_dir, &samples, &batch, |_| {})
+        .await
+        .unwrap();
+    api.finish_batches();
+
+    let collected = bench::run(&engine(), &run_dir, &samples, &batch, |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(collected.completed, 1);
+    assert!(collected.stopped.unwrap().contains("expired"));
+    assert_eq!(collected.pending_batch, None);
+    let ids: Vec<_> = records(&run_dir).into_iter().map(|r| r.sample_id).collect();
+    assert_eq!(ids, ["dev_7"]);
+
+    let resubmitted = bench::run(&engine(), &run_dir, &samples, &batch, |_| {})
+        .await
+        .unwrap();
+
+    assert!(resubmitted.pending_batch.is_some());
+    let batches = api.batches();
+    assert_eq!(batches.len(), 2);
+    let asked: Vec<_> = batches[1].iter().map(|r| r.user.contains("dogs")).collect();
+    assert_eq!(asked, [true]);
+}
+
+#[tokio::test]
+async fn stops_asking_once_every_run_under_the_same_root_has_spent_the_limit() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let runs = tempfile::tempdir().unwrap();
+    // $50 a call on Haiku 4.5 ($1/M input).
+    let usage = Usage {
+        input_tokens: 50_000_000,
+        ..Usage::default()
+    };
+    let api = ScriptedLlm::new(std::iter::repeat_n(
+        reply("animals", r#"[{"$count": "n"}]"#),
+        3,
+    ))
+    .with_model("claude-haiku-4-5")
+    .with_usage(usage);
+    let engine = || {
+        Engine::new(
+            api.clone(),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+    };
+    let samples = engine().dataset().samples().to_vec();
+    let limited = |mode| Options {
+        mode,
+        spend_limit_usd: Some(80.0),
+        ..Options::default()
+    };
+    // An earlier run spent $50.
+    bench::run(
+        &engine(),
+        &runs.path().join("earlier"),
+        &samples[..1],
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // $50 spent is under the limit, so one more call; then $100 is over it.
+    let sync = bench::run(
+        &engine(),
+        &runs.path().join("sync"),
+        &samples,
+        &limited(Mode::Sync),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(sync.completed, 1);
+    assert!(sync.stopped.unwrap().contains("spend limit"));
+    assert_eq!(api.requests().len(), 2);
+
+    let batch = bench::run(
+        &engine(),
+        &runs.path().join("batch"),
+        &samples,
+        &limited(Mode::Batch),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert!(batch.stopped.unwrap().contains("spend limit"));
+    assert!(api.batches().is_empty());
+}
+
+#[tokio::test]
+async fn retries_rate_limits_and_overloads_a_few_times_but_stops_at_once_when_credit_runs_out() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let runs = tempfile::tempdir().unwrap();
+    let credit = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+    let api = ScriptedLlm::new([
+        Scripted::api_error(429, "rate limited"),
+        Scripted::api_error(529, "overloaded"),
+        Scripted::Text(reply("animals", r#"[{"$count": "n"}]"#)),
+        Scripted::api_error(400, credit),
+    ]);
+    let engine = Engine::new(
+        api.clone(),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    );
+    let samples = engine.dataset().samples().to_vec();
+
+    let summary = bench::run(
+        &engine,
+        &runs.path().join("run"),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(summary.completed, 1);
+    assert!(
+        summary
+            .stopped
+            .unwrap()
+            .contains("credit balance is too low")
+    );
+    assert_eq!(api.requests().len(), 4, "the credit error was not retried");
+
+    // Overloaded on every attempt: three retries, then the run stops.
+    let overloaded = ScriptedLlm::new((0..5).map(|_| Scripted::api_error(529, "overloaded")));
+    let engine = Engine::new(
+        overloaded.clone(),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    );
+    let summary = bench::run(
+        &engine,
+        &runs.path().join("run"),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(summary.completed, 0);
+    assert!(summary.stopped.unwrap().contains("529"));
+    assert_eq!(overloaded.requests().len(), 4);
+}
+
+#[tokio::test]
+async fn waits_for_a_pending_batch_in_one_invocation_and_refuses_a_sync_run_meanwhile() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let runs = tempfile::tempdir().unwrap();
+    let run_dir = runs.path().join("batch");
+    let api = ScriptedLlm::new(std::iter::repeat_n(
+        reply("animals", r#"[{"$count": "n"}]"#),
+        2,
+    ));
+    let engine = || {
+        Engine::new(
+            api.clone(),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+    };
+    let samples = engine().dataset().samples().to_vec();
+    bench::run(
+        &engine(),
+        &run_dir,
+        &samples,
+        &Options {
+            mode: Mode::Batch,
+            ..Options::default()
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // A sync run would answer the samples the pending batch is paying for.
+    let sync = bench::run(&engine(), &run_dir, &samples, &Options::default(), |_| {})
+        .await
+        .unwrap();
+    assert!(sync.stopped.unwrap().contains("still pending"));
+    assert!(api.requests().is_empty());
+
+    let mut checks = 0;
+    let waited = bench::run(
+        &engine(),
+        &run_dir,
+        &samples,
+        &Options {
+            mode: Mode::Batch,
+            batch_poll: Some(std::time::Duration::ZERO),
+            ..Options::default()
+        },
+        |progress| {
+            if let Progress::BatchPending(_) = progress {
+                checks += 1;
+                if checks == 2 {
+                    api.finish_batches();
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!((waited.completed, waited.remaining), (2, 0));
+    assert_eq!((waited.pending_batch, waited.stopped), (None, None));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("manifest.json")).unwrap()).unwrap();
+    let modes: Vec<_> = manifest["invocations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["mode"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(modes, ["batch", "sync", "batch"]);
 }

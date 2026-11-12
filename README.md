@@ -79,6 +79,26 @@ interrupted run (killed, or stopped by an API error such as a usage limit,
 exit code 2) is continued by running it again. A half-written last line from a
 kill is discarded and that question is asked again.
 
+`--mode batch` sends every unanswered question as one
+[Message Batch](https://platform.claude.com/docs/en/build-with-claude/batch-processing)
+at half price (cache multipliers included) and checks it every 60 seconds
+until it ends, usually within an hour. The batch id is kept in
+`runs/<name>/batches.json`, so the command can be interrupted at any time:
+rerunning it collects the same batch instead of submitting again. Requests
+the batch did not answer (errored, expired, canceled) are not recorded; the
+run stops (exit code 2) and a rerun submits them again. While a batch is
+pending, a sync run of the same directory is refused, so no question is paid
+for twice. Batch records have `"batch": true` and no latency.
+
+Rate limits (429) and overloads (529), on calls and on batch submits and
+checks, are retried up to three times, waiting for `retry-after` (5, 10 and
+20 s without one, at most 60 s); any other API error, such as a credit
+balance that is too low, stops the run at once. `--spend-limit` (default USD
+80) stops the run before the next call or batch once every run directory
+next to this one (all of `runs/` here) has together cost that much; review
+the spend, then rerun with a higher limit to continue. A batch can overshoot
+the limit by its own cost, since its cost is known only when it ends.
+
 `runs/<name>/manifest.json` fixes the run's configuration (arm, model,
 temperature, thinking, knowledge mode, IR, prompt hash) at the first
 invocation and lists every invocation with the mqlc version it ran. Resuming

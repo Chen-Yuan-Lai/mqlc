@@ -8,7 +8,7 @@ use mongodb::bson::Document;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::{Dataset, DatasetError, Sample};
-use crate::llm::{LlmClient, LlmError, LlmRequest, Usage};
+use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Usage, with_retries};
 use crate::reply::{ParseError, parse_reply};
 
 const MAX_TOKENS: u32 = 4096;
@@ -62,7 +62,8 @@ pub struct Query {
 pub struct Answer {
     pub reply: String,
     pub usage: Usage,
-    pub latency: Duration,
+    /// `None` for batch answers, which have no per-request latency.
+    pub latency: Option<Duration>,
     /// `None` when the reply could not be parsed.
     pub query: Option<Query>,
     pub rows: Result<Vec<Document>, AnswerError>,
@@ -116,23 +117,41 @@ impl<L: LlmClient> Engine<L> {
     /// Answers one question with the official prompt and schema description
     /// (no evidence), at temperature 0.
     pub async fn ask(&self, sample: &Sample) -> Result<Answer, AskError> {
+        let request = self.request(sample)?;
+        let (response, latency) = with_retries(|| async {
+            let started = Instant::now();
+            let response = self.llm.complete(&request).await?;
+            Ok((response, started.elapsed()))
+        })
+        .await?;
+        self.answer(sample, response, Some(latency)).await
+    }
+
+    /// The LLM request that `ask` sends for `sample`.
+    pub fn request(&self, sample: &Sample) -> Result<LlmRequest, AskError> {
         let prompt = self.dataset.prompt();
         let schema = self
             .dataset
             .schema_description(&sample.split, &sample.db_id)?;
-        let request = LlmRequest {
+        Ok(LlmRequest {
             system: prompt.system.clone(),
             context: prompt.schema_block(&schema),
             user: prompt.question_block(&sample.question, None),
             max_tokens: MAX_TOKENS,
             temperature: TEMPERATURE,
-        };
-        let started = Instant::now();
-        let response = self.llm.complete(&request).await?;
-        let latency = started.elapsed();
+        })
+    }
 
+    /// Parses and executes the reply to `sample`'s request, however it was
+    /// obtained (synchronously or from a batch).
+    pub async fn answer(
+        &self,
+        sample: &Sample,
+        response: LlmResponse,
+        latency: Option<Duration>,
+    ) -> Result<Answer, AskError> {
         let parsed = if response.truncated {
-            Err(AnswerError::Truncated(request.max_tokens))
+            Err(AnswerError::Truncated(MAX_TOKENS))
         } else {
             parse_reply(&response.text).map_err(AnswerError::from)
         };

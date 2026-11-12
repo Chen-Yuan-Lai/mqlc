@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -60,8 +61,28 @@ enum Command {
 
         #[arg(long, env = "MQLC_MODEL", default_value = "claude-haiku-4-5")]
         model: String,
+
+        /// `batch` submits every unanswered question as one Message Batch at
+        /// half price and waits for it; interrupt at any time and rerun to
+        /// collect it.
+        #[arg(long, value_enum, default_value_t = ModeArg::Sync)]
+        mode: ModeArg,
+
+        /// Stop once every run next to this one (all directories under the
+        /// parent of --out) has together cost this many USD.
+        #[arg(long, default_value_t = 80.0)]
+        spend_limit: f64,
     },
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ModeArg {
+    Sync,
+    Batch,
+}
+
+/// How often a pending batch is checked.
+const BATCH_POLL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum SplitArg {
@@ -130,7 +151,7 @@ async fn main() -> Result<()> {
                 u.output_tokens,
                 u.cache_read_input_tokens,
                 u.cache_creation_input_tokens,
-                answer.latency.as_millis()
+                answer.latency.unwrap_or_default().as_millis()
             );
             if answer.rows.is_err() {
                 std::process::exit(1);
@@ -141,6 +162,8 @@ async fn main() -> Result<()> {
             split,
             limit,
             model,
+            mode,
+            spend_limit,
         } => {
             let mut samples: Vec<Sample> = dataset
                 .samples()
@@ -153,16 +176,34 @@ async fn main() -> Result<()> {
             samples.sort_by(|a, b| a.db_id.cmp(&b.db_id));
             let engine = Engine::new(AnthropicClient::new(api_key()?, model), mongo, dataset);
 
+            let options = bench::Options {
+                mode: match mode {
+                    ModeArg::Sync => bench::Mode::Sync,
+                    ModeArg::Batch => bench::Mode::Batch,
+                },
+                spend_limit_usd: Some(spend_limit),
+                batch_poll: Some(BATCH_POLL),
+            };
+
             let total = samples.len();
             let mut seen = 0;
-            let summary = bench::run(&engine, &out, &samples, |r| {
-                seen += 1;
-                let status = r.error.as_ref().map_or("ok", |e| e.kind.as_str());
-                let cost = r.cost_usd.map_or("?".to_string(), |c| format!("${c:.4}"));
-                eprintln!(
-                    "[{seen}] {} {:<24} {:<11} {cost:>8}  {} ms",
-                    r.sample_id, r.db_id, status, r.latency_ms
-                );
+            let summary = bench::run(&engine, &out, &samples, &options, |progress| match progress {
+                bench::Progress::Answered(r) => {
+                    seen += 1;
+                    let status = r.error.as_ref().map_or("ok", |e| e.kind.as_str());
+                    let cost = r.cost_usd.map_or("?".to_string(), |c| format!("${c:.4}"));
+                    let latency = r
+                        .latency_ms
+                        .map_or("batch".to_string(), |ms| format!("{ms} ms"));
+                    eprintln!(
+                        "[{seen}] {} {:<24} {:<11} {cost:>8}  {latency}",
+                        r.sample_id, r.db_id, status
+                    );
+                }
+                bench::Progress::BatchPending(id) => eprintln!(
+                    "batch {id} is processing; checking again in {}s (safe to interrupt and rerun)",
+                    BATCH_POLL.as_secs()
+                ),
             })
             .await?;
 
@@ -172,10 +213,7 @@ async fn main() -> Result<()> {
             };
             eprintln!(
                 "{} answered, {} already done, {} of {total} remaining; run cost so far ${:.4}{unpriced}",
-                summary.completed,
-                summary.skipped,
-                total - summary.completed - summary.skipped,
-                summary.cost_usd
+                summary.completed, summary.skipped, summary.remaining, summary.cost_usd
             );
             if let Some(reason) = summary.stopped {
                 eprintln!("stopped early: {reason}\nrerun the same command to continue");
