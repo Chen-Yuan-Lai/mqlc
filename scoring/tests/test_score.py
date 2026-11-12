@@ -61,6 +61,7 @@ def data_dir(tmp_path):
         gold("dev_1", [{"$match": {"born": {"$gte": {"$date": "2019-01-01T00:00:00Z"}}}}, {"$count": "n"}]),
         gold("dev_2", names),
         gold("dev_3", names),
+        gold("dev_4", names),
     ]
     (data / "aptmqlbench_data.jsonl").write_text("".join(json.dumps(s) + "\n" for s in samples))
     return data
@@ -81,19 +82,23 @@ def test_scores_a_run_with_official_soft_ex_strict_ex_and_exec_rate(
         # Right names plus an extra field: Soft-EX only.
         record("dev_2", [{"$match": {"species": "cat"}}, {"$project": {"_id": 0, "name": 1, "age": 1}}]),
         record("dev_3", error={"kind": "parse", "message": "no pipeline"}),
+        # Never sent, so neither right nor wrong: left out of every share.
+        record("dev_4", error={"kind": "skipped_context_overflow", "message": "too long"}),
     ]
     (run / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
 
     summary = score.score_run(run, data_dir, mongo_uri)
 
     assert summary["samples"] == 3
+    assert summary["skipped_context_overflow"] == 1
     assert summary["exec_rate"] == pytest.approx(200 / 3)
     assert summary["soft_ex"] == pytest.approx(200 / 3)
     assert summary["strict_ex"] == pytest.approx(100 / 3)
     per_sample = [json.loads(l) for l in (run / "scores.jsonl").read_text().splitlines()]
-    assert [(s["sample_id"], s["soft_ex"], s["strict_ex"]) for s in per_sample] == [
-        ("dev_1", True, True),
-        ("dev_2", True, False),
-        ("dev_3", False, False),
+    assert [(s["sample_id"], s["soft_ex"], s["strict_ex"], s["skipped"]) for s in per_sample] == [
+        ("dev_1", True, True, False),
+        ("dev_2", True, False, False),
+        ("dev_3", False, False, False),
+        ("dev_4", False, False, True),
     ]
     assert json.loads((run / "summary.json").read_text()) == summary

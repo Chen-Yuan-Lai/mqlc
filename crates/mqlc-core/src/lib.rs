@@ -15,6 +15,7 @@ pub mod testing;
 pub use dataset::{Dataset, DatasetError, Sample};
 pub use engine::{Answer, AnswerError, AskError, Engine, Query, Settings};
 pub use llm::{
-    AnthropicClient, BatchItem, BatchPoll, LlmClient, LlmError, LlmRequest, LlmResponse, Usage,
+    AnthropicClient, BatchItem, BatchPoll, LlmClient, LlmError, LlmRequest, LlmResponse,
+    OpenAiClient, Usage,
 };
 pub use reply::ParseError;

@@ -609,3 +609,52 @@ async fn waits_for_a_pending_batch_in_one_invocation_and_refuses_a_sync_run_mean
         .collect();
     assert_eq!(modes, ["batch", "sync", "batch"]);
 }
+
+#[tokio::test]
+async fn questions_whose_prompt_exceeds_the_context_window_are_recorded_as_skipped_without_asking()
+{
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let runs = tempfile::tempdir().unwrap();
+    // The fixture prompt is a few hundred tokens: it fits 1,000 tokens, but
+    // not with room for a 4,096-token reply.
+    let api = ScriptedLlm::new(Vec::<String>::new()).with_context_window(1000);
+    let engine = || {
+        Engine::new(
+            api.clone(),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+    };
+    let samples = engine().dataset().samples().to_vec();
+
+    for (dir, mode) in [("sync", Mode::Sync), ("batch", Mode::Batch)] {
+        let run_dir = runs.path().join(dir);
+        let summary = bench::run(
+            &engine(),
+            &run_dir,
+            &samples,
+            &Options {
+                mode,
+                ..Options::default()
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((summary.completed, summary.remaining), (2, 0), "{dir}");
+        assert_eq!((summary.stopped, summary.pending_batch), (None, None));
+        for record in records(&run_dir) {
+            assert_eq!(record.error.unwrap().kind, "skipped_context_overflow");
+            assert_eq!(record.usage, Usage::default());
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["config"]["backend"], "scripted");
+        assert_eq!(manifest["config"]["context_window"], 1000);
+        assert_eq!(manifest["invocations"][0]["endpoint"], "scripted");
+    }
+    assert!(api.requests().is_empty() && api.batches().is_empty());
+}

@@ -8,6 +8,9 @@ the results with the official `compare_fuzzy`:
 - Strict-EX: the same comparison without extra fields (`allow_column_subset=False`).
 - Exec-Rate: share of predictions that parsed and executed without error.
 
+Records skipped for a context overflow (the prompt was never sent) are neither
+right nor wrong: they are left out of all three shares and counted apart.
+
 Writes `scores.jsonl` (one line per record) and `summary.json` into the run
 directory, and prints the summary.
 
@@ -24,6 +27,7 @@ from pathlib import Path
 from bson import json_util
 
 DEFAULT_URI = "mongodb://mqlc:mqlc@localhost:27017/?authSource=admin"
+SKIPPED = "skipped_context_overflow"
 
 
 def load_eval_script(data_dir: Path):
@@ -60,7 +64,11 @@ def compare(ev, gold: str, pred: str, **kwargs) -> tuple[bool, str]:
 
 
 def score_record(ev, mongo_uri: str, record: dict, sample: dict) -> dict:
-    out = {"sample_id": record["sample_id"], "db_id": record["db_id"], "candidate": record["candidate"]}
+    out = {"sample_id": record["sample_id"], "db_id": record["db_id"],
+           "candidate": record["candidate"], "skipped": False}
+    if (record.get("error") or {}).get("kind") == SKIPPED:
+        return out | {"exec_ok": False, "soft_ex": False, "strict_ex": False, "skipped": True,
+                      "message": f"{SKIPPED}: {record['error']['message']}"}
     if record.get("error") or record.get("pipeline") is None:
         error = record.get("error") or {"kind": "parse", "message": "no pipeline"}
         return out | {"exec_ok": False, "soft_ex": False, "strict_ex": False,
@@ -85,9 +93,10 @@ def score_record(ev, mongo_uri: str, record: dict, sample: dict) -> dict:
 
 
 def percentages(scores: list[dict]) -> dict:
-    n = len(scores)
-    share = lambda key: 100 * sum(s[key] for s in scores) / n if n else 0.0
-    return {"samples": n, "exec_rate": share("exec_ok"),
+    scored = [s for s in scores if not s["skipped"]]
+    n = len(scored)
+    share = lambda key: 100 * sum(s[key] for s in scored) / n if n else 0.0
+    return {"samples": n, SKIPPED: len(scores) - n, "exec_rate": share("exec_ok"),
             "soft_ex": share("soft_ex"), "strict_ex": share("strict_ex")}
 
 
@@ -119,11 +128,11 @@ def main() -> None:
     args = parser.parse_args()
 
     summary = score_run(args.run_dir, args.data_dir, args.mongo_uri)
-    print(f"{'database':<26}{'n':>5}{'Exec-Rate':>11}{'Soft-EX':>9}{'Strict-EX':>11}")
+    print(f"{'database':<26}{'n':>5}{'skipped':>9}{'Exec-Rate':>11}{'Soft-EX':>9}{'Strict-EX':>11}")
     rows = list(summary["by_db"].items()) + [("all", summary)]
     for db, s in rows:
-        print(f"{db:<26}{s['samples']:>5}{s['exec_rate']:>10.2f}%{s['soft_ex']:>8.2f}%"
-              f"{s['strict_ex']:>10.2f}%")
+        print(f"{db:<26}{s['samples']:>5}{s[SKIPPED]:>9}{s['exec_rate']:>10.2f}%"
+              f"{s['soft_ex']:>8.2f}%{s['strict_ex']:>10.2f}%")
 
 
 if __name__ == "__main__":

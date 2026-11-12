@@ -49,6 +49,7 @@ impl From<&str> for Scripted {
 pub struct ScriptedLlm {
     model: String,
     usage: Usage,
+    context_window: u32,
     state: Arc<Mutex<State>>,
 }
 
@@ -70,6 +71,7 @@ impl ScriptedLlm {
         Self {
             model: "scripted".to_string(),
             usage: Usage::default(),
+            context_window: 1_000_000,
             state: Arc::new(Mutex::new(State {
                 replies: replies.into_iter().map(Into::into).collect(),
                 ..State::default()
@@ -85,6 +87,11 @@ impl ScriptedLlm {
     /// Usage reported for every reply.
     pub fn with_usage(mut self, usage: Usage) -> Self {
         self.usage = usage;
+        self
+    }
+
+    pub fn with_context_window(mut self, tokens: u32) -> Self {
+        self.context_window = tokens;
         self
     }
 
@@ -149,6 +156,18 @@ impl ScriptedLlm {
 impl LlmClient for ScriptedLlm {
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn backend(&self) -> &str {
+        "scripted"
+    }
+
+    fn endpoint(&self) -> &str {
+        "scripted"
+    }
+
+    fn context_window(&self) -> u32 {
+        self.context_window
     }
 
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {

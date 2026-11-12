@@ -68,6 +68,16 @@ pub trait LlmClient: Send + Sync {
     /// The model id, as recorded in results and manifests.
     fn model(&self) -> &str;
 
+    /// Which kind of API this is (`anthropic`, `openai`), for manifests.
+    fn backend(&self) -> &str;
+
+    /// The API's base URL, for manifests.
+    fn endpoint(&self) -> &str;
+
+    /// Tokens the model accepts in one prompt. Longer prompts are not sent:
+    /// servers would truncate them silently.
+    fn context_window(&self) -> u32;
+
     fn complete(
         &self,
         request: &LlmRequest,
@@ -210,27 +220,47 @@ impl AnthropicClient {
             .header("anthropic-version", "2023-06-01")
             .send()
             .await?;
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(resp);
-        }
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok())
-            .map(Duration::from_secs);
-        Err(LlmError::Api {
-            status: status.as_u16(),
-            body: resp.text().await.unwrap_or_default(),
-            retry_after,
-        })
+        checked(resp).await
     }
 }
+
+/// `resp` if it succeeded, otherwise its status, body and `retry-after`.
+async fn checked(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_secs);
+    Err(LlmError::Api {
+        status: status.as_u16(),
+        body: resp.text().await.unwrap_or_default(),
+        retry_after,
+    })
+}
+
+/// Claude Haiku, Sonnet and Opus 4.5 all take 200K tokens.
+pub const ANTHROPIC_CONTEXT_WINDOW: u32 = 200_000;
 
 impl LlmClient for AnthropicClient {
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn backend(&self) -> &str {
+        "anthropic"
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.base_url
+    }
+
+    fn context_window(&self) -> u32 {
+        ANTHROPIC_CONTEXT_WINDOW
     }
 
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -286,5 +316,130 @@ impl LlmClient for AnthropicClient {
             })
             .collect::<Result<_, LlmError>>()?;
         Ok(BatchPoll::Ended(items))
+    }
+}
+
+/// Any OpenAI-compatible `/chat/completions` endpoint: local Ollama, vLLM,
+/// OpenRouter. The context window must match what the server is configured
+/// for (for Ollama, `OLLAMA_CONTEXT_LENGTH`), since servers truncate longer
+/// prompts without saying so.
+pub struct OpenAiClient {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: Option<String>,
+    model: String,
+    context_window: u32,
+}
+
+impl OpenAiClient {
+    /// `base_url` ends before `/chat/completions`, e.g.
+    /// `http://localhost:11434/v1`.
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+        context_window: u32,
+    ) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                // Local models on a CPU are slow.
+                .timeout(Duration::from_secs(900))
+                .build()
+                .expect("TLS backend available"),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key,
+            model: model.into(),
+            context_window,
+        }
+    }
+}
+
+const NO_BATCH_MODE: &str = "the OpenAI-compatible backend has no batch mode; use --mode sync";
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: ChatUsage,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatMessage {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+}
+
+impl LlmClient for OpenAiClient {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn backend(&self) -> &str {
+        "openai"
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.base_url
+    }
+
+    fn context_window(&self) -> u32 {
+        self.context_window
+    }
+
+    async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "messages": [
+                { "role": "system", "content": request.system },
+                { "role": "user", "content": format!("{}\n\n{}", request.context, request.user) },
+            ],
+        });
+        let mut http = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&body);
+        if let Some(key) = &self.api_key {
+            http = http.bearer_auth(key);
+        }
+        let parsed: ChatResponse = checked(http.send().await?).await?.json().await?;
+        let choice = parsed
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| LlmError::Other("response has no choices".into()))?;
+        Ok(LlmResponse {
+            text: choice.message.content.unwrap_or_default(),
+            usage: Usage {
+                input_tokens: parsed.usage.prompt_tokens,
+                output_tokens: parsed.usage.completion_tokens,
+                ..Usage::default()
+            },
+            truncated: choice.finish_reason.as_deref() == Some("length"),
+        })
+    }
+
+    async fn submit_batch(&self, _requests: &[(String, LlmRequest)]) -> Result<String, LlmError> {
+        Err(LlmError::Other(NO_BATCH_MODE.into()))
+    }
+
+    async fn poll_batch(&self, _id: &str) -> Result<BatchPoll, LlmError> {
+        Err(LlmError::Other(NO_BATCH_MODE.into()))
     }
 }

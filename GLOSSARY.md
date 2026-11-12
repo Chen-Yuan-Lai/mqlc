@@ -84,7 +84,7 @@ knowledge 放進 prompt 的方式：full（全部放入）、rag（只放檢索�
 rag 模式檢索到的 collection 涵蓋 gold pipeline 所用 collection（起始 collection、`$lookup.from`、`$unionWith`）的比例。
 
 **Context overflow**：
-prompt 超過後端宣告的 context window；這種 sample 不送出，另外計數，不算答錯。
+prompt 加上回覆的長度上限，超過後端宣告的 context window；這種 sample 不送出，另外計數，不算答錯。
 
 ## 驗證與修正
 

@@ -69,6 +69,30 @@ are refused before they reach the database.
 | `--model` | `MQLC_MODEL` | `claude-haiku-4-5` |
 | `--max-rows` | | `20` |
 
+### Other backends
+
+`--backend openai` talks to any OpenAI-compatible `/chat/completions`
+endpoint (local Ollama, vLLM, OpenRouter) at `--base-url` (default
+`http://localhost:11434/v1`, Ollama), with an optional `OPENAI_API_KEY`.
+It needs `--context-window`, the tokens the served model accepts per prompt,
+which must match the server: Ollama silently truncates prompts past its
+`OLLAMA_CONTEXT_LENGTH`. All three settings can go in `.env` as
+`MQLC_BACKEND`, `MQLC_BASE_URL` and `MQLC_CONTEXT_WINDOW`.
+
+```bash
+cargo run --release -p mqlc -- --backend openai --model qwen2.5-coder:3b \
+  --context-window 8192 bench --out runs/ollama-restaurant --split train --db restaurant --limit 5
+```
+
+`--model` is required with it. Before sending, mqlc estimates the prompt at 3
+bytes a token (an overestimate for English); a prompt that leaves no room for
+the longest reply (4,096 tokens) in the context window is not sent and is
+recorded as `skipped_context_overflow` (`mqlc ask` exits 3). The scorer leaves
+those out of every share and reports their count. Each manifest invocation
+records the endpoint. Anthropic models declare 200K tokens. The OpenAI backend
+has no batch mode and no prices, so its calls count as unpriced and do not
+add to the spend limit.
+
 ### Benchmark runs
 
 ```bash
@@ -77,12 +101,12 @@ uv run --project scoring scoring/score.py runs/haiku-dev
 ```
 
 `mqlc bench` answers every question of a split (`train`, `dev` or `all`; add
-`--limit N` for the first N) and appends one record per answer to
-`runs/<name>/results.jsonl`. Records are keyed by (arm, model, sample id,
-candidate): rerunning the same command skips answered questions, so an
-interrupted run (killed, or stopped by an API error such as a usage limit,
-exit code 2) is continued by running it again. A half-written last line from a
-kill is discarded and that question is asked again.
+`--db <name>` for one database and `--limit N` for the first N) and appends
+one record per answer to `runs/<name>/results.jsonl`. Records are keyed by
+(arm, model, sample id, candidate): rerunning the same command skips answered
+questions, so an interrupted run (killed, or stopped by an API error such as a
+usage limit, exit code 2) is continued by running it again. A half-written
+last line from a kill is discarded and that question is asked again.
 
 `--mode batch` sends every unanswered question as one
 [Message Batch](https://platform.claude.com/docs/en/build-with-claude/batch-processing)

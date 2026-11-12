@@ -39,6 +39,12 @@ pub enum AnswerError {
     WriteStage(String),
     #[error("query failed: {0}")]
     Mongo(mongodb::error::Error),
+    /// Not the model's failure: the prompt was never sent. Recorded so a
+    /// rerun does not ask again, and left out of the scores.
+    #[error(
+        "prompt of about {estimated} tokens plus the reply does not fit the {window}-token context window"
+    )]
+    ContextOverflow { estimated: u64, window: u32 },
 }
 
 impl AnswerError {
@@ -48,6 +54,7 @@ impl AnswerError {
             Self::Parse(_) => "parse",
             Self::WriteStage(_) => "write_stage",
             Self::Mongo(_) => "execution",
+            Self::ContextOverflow { .. } => "skipped_context_overflow",
         }
     }
 }
@@ -118,6 +125,9 @@ impl<L: LlmClient> Engine<L> {
     /// (no evidence), at temperature 0.
     pub async fn ask(&self, sample: &Sample) -> Result<Answer, AskError> {
         let request = self.request(sample)?;
+        if let Some(skipped) = self.overflow_answer(&request) {
+            return Ok(skipped);
+        }
         let (response, latency) = with_retries(|| async {
             let started = Instant::now();
             let response = self.llm.complete(&request).await?;
@@ -125,6 +135,24 @@ impl<L: LlmClient> Engine<L> {
         })
         .await?;
         self.answer(sample, response, Some(latency)).await
+    }
+
+    /// The answer for a request whose prompt, with room for the longest
+    /// reply, does not fit the backend's context window; such a request is
+    /// not sent. Prompt tokens are estimated at 3 bytes a token, which
+    /// overestimates (English runs near 4) so that a prompt near the limit is
+    /// skipped rather than silently truncated.
+    pub fn overflow_answer(&self, request: &LlmRequest) -> Option<Answer> {
+        let bytes = request.system.len() + request.context.len() + request.user.len();
+        let estimated = bytes.div_ceil(3) as u64;
+        let window = self.llm.context_window();
+        (estimated + u64::from(request.max_tokens) > u64::from(window)).then(|| Answer {
+            reply: String::new(),
+            usage: Usage::default(),
+            latency: None,
+            query: None,
+            rows: Err(AnswerError::ContextOverflow { estimated, window }),
+        })
     }
 
     /// The LLM request that `ask` sends for `sample`.

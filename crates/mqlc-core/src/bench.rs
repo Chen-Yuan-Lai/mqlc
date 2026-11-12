@@ -12,8 +12,8 @@ use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::Sample;
-use crate::engine::{Answer, AskError, Engine, Settings};
-use crate::llm::{BatchPoll, LlmClient, LlmRequest, Usage, with_retries};
+use crate::engine::{Answer, Engine, Settings};
+use crate::llm::{ANTHROPIC_CONTEXT_WINDOW, BatchPoll, LlmClient, LlmRequest, Usage, with_retries};
 use crate::pricing;
 
 const RESULTS: &str = "results.jsonl";
@@ -147,6 +147,11 @@ pub struct Manifest {
 pub struct RunConfig {
     pub arm: String,
     pub model: String,
+    /// Absent from manifests written before other backends existed.
+    #[serde(default = "anthropic")]
+    pub backend: String,
+    #[serde(default = "anthropic_context_window")]
+    pub context_window: u32,
     #[serde(flatten)]
     pub settings: Settings,
     pub prompt_hash: String,
@@ -156,6 +161,10 @@ pub struct RunConfig {
 pub struct Invocation {
     pub started_at: String,
     pub mqlc_version: String,
+    /// The API's base URL, which may change between invocations (a local
+    /// server on another port) without changing what the run measures.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub mode: Mode,
     pub samples: usize,
@@ -202,9 +211,12 @@ pub async fn run<L: LlmClient>(
         RunConfig {
             arm: ARM.to_string(),
             model: model.clone(),
+            backend: engine.llm().backend().to_string(),
+            context_window: engine.llm().context_window(),
             settings: engine.settings(),
             prompt_hash: engine.dataset().prompt().hash().to_string(),
         },
+        engine.llm().endpoint(),
         options.mode,
         samples.len(),
     )?;
@@ -350,14 +362,20 @@ async fn run_batch<L: LlmClient>(
         if let Some(reason) = budget.exceeded(rec.summary.cost_usd) {
             return Ok(Some(reason));
         }
-        let requests = unanswered
-            .iter()
-            .map(|s| Ok((s.sample_id.clone(), engine.request(s)?)))
-            .collect::<Result<Vec<(String, LlmRequest)>, AskError>>();
-        let requests = match requests {
-            Ok(requests) => requests,
-            Err(e) => return Ok(Some(e.to_string())),
-        };
+        let mut requests: Vec<(String, LlmRequest)> = Vec::new();
+        for sample in unanswered {
+            let request = match engine.request(sample) {
+                Ok(request) => request,
+                Err(e) => return Ok(Some(e.to_string())),
+            };
+            match engine.overflow_answer(&request) {
+                Some(skipped) => rec.write(sample, skipped, false)?,
+                None => requests.push((sample.sample_id.clone(), request)),
+            }
+        }
+        if requests.is_empty() {
+            return Ok(None);
+        }
         let id = match with_retries(|| engine.llm().submit_batch(&requests)).await {
             Ok(id) => id,
             Err(e) => return Ok(Some(e.to_string())),
@@ -468,6 +486,14 @@ impl Budget {
     }
 }
 
+fn anthropic() -> String {
+    "anthropic".to_string()
+}
+
+fn anthropic_context_window() -> u32 {
+    ANTHROPIC_CONTEXT_WINDOW
+}
+
 /// Total cost recorded by every run directory under `root` except
 /// `run_dir`. Read-only, and lenient: another run may be writing its last line.
 fn spent_by_other_runs(root: &Path, run_dir: &Path) -> f64 {
@@ -524,6 +550,7 @@ fn save_batches(path: &Path, batches: &[SubmittedBatch]) -> Result<(), BenchErro
 fn record_invocation(
     path: &Path,
     config: RunConfig,
+    endpoint: &str,
     mode: Mode,
     samples: usize,
 ) -> Result<(), BenchError> {
@@ -557,6 +584,7 @@ fn record_invocation(
     manifest.invocations.push(Invocation {
         started_at: now(),
         mqlc_version: version(),
+        endpoint: Some(endpoint.to_string()),
         mode,
         samples,
     });
