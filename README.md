@@ -162,9 +162,27 @@ profile, and writes one
 collection and one column per field path, and `instructions.json`. Field
 types, presence, arrays, embedded documents and the array a field sits in are
 column properties in the `mqlc.` namespace (ADR 0004), so `mdl.json` stays
-valid Wren MDL. `--split` and `--db` choose the databases; all 21 take about
-35 s, and rerunning overwrites them. On AptMQL-Bench, 100,000 documents find
-every field a full scan finds.
+valid Wren MDL. So are values: a field with at most 20 distinct values lists
+them all; one with more gets its most common repeated values, min and max for
+numbers and dates, and a regex format most of its strings follow. A field
+whose values are `_id`s of another collection (any ObjectId, or a key named
+for the collection, such as `accountId` for `accounts`) becomes an MDL
+relationship. `--split` and `--db` choose the databases; all 21 take about
+a minute, and rerunning overwrites them. On AptMQL-Bench, 100,000 documents
+find every field a full scan finds.
+
+```bash
+cargo run --release -p mqlc -- profile --exclude financial.clients.birthDate
+```
+
+`--exclude <db>.<collection>.<path>` (repeatable) leaves a sensitive field and
+everything under it out: MongoDB never returns its values, and the MDL keeps
+only its path (`mqlc.excluded`), so neither its values nor the field reach
+the prompt. Excluding a field that is not there is an error.
+
+Rendered, the auto MDL of a database takes about 60% of the tokens of its
+official schema description (126k against 211k over all 21; works_cycles,
+the largest, 30k).
 
 `--arm auto-mdl` (for `ask` and `bench`) puts the auto MDL in the prompt in
 place of the official schema description, in the same layout (`Collection:

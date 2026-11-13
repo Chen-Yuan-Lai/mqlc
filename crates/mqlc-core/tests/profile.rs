@@ -54,6 +54,24 @@ fn column<'a>(project: &'a MdlProject, model: &str, name: &str) -> &'a Column {
         .unwrap_or_else(|| panic!("no column {model}.{name}"))
 }
 
+/// The structural properties: the column's `mqlc.*` properties other than
+/// those describing its values.
+fn structure(c: &Column) -> BTreeMap<String, String> {
+    const VALUES: [&str; 6] = [
+        "mqlc.distinct",
+        "mqlc.enum",
+        "mqlc.topValues",
+        "mqlc.min",
+        "mqlc.max",
+        "mqlc.format",
+    ];
+    c.properties
+        .iter()
+        .filter(|(k, _)| !VALUES.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
 fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
         .iter()
@@ -109,7 +127,7 @@ async fn profiles_nested_paths_arrays_and_embedded_documents_into_mqlc_propertie
     let name = column(&project, "animals", "name");
     assert_eq!((name.r#type.as_str(), name.not_null), ("String", true));
     assert_eq!(
-        name.properties,
+        structure(name),
         props(&[
             ("mqlc.path", "name"),
             ("mqlc.presence", "3/3"),
@@ -139,7 +157,7 @@ async fn profiles_nested_paths_arrays_and_embedded_documents_into_mqlc_propertie
     // may be missing.
     let owner_name = column(&project, "animals", "owner.name");
     assert_eq!(
-        owner_name.properties,
+        structure(owner_name),
         props(&[
             ("mqlc.path", "owner.name"),
             ("mqlc.presence", "2/2"),
@@ -159,7 +177,7 @@ async fn profiles_nested_paths_arrays_and_embedded_documents_into_mqlc_propertie
     let tags = column(&project, "animals", "tags");
     assert_eq!(tags.r#type, "Array");
     assert_eq!(
-        tags.properties,
+        structure(tags),
         props(&[
             ("mqlc.path", "tags"),
             ("mqlc.presence", "2/3"),
@@ -171,7 +189,7 @@ async fn profiles_nested_paths_arrays_and_embedded_documents_into_mqlc_propertie
 
     let visits = column(&project, "animals", "visits");
     assert_eq!(
-        visits.properties,
+        structure(visits),
         props(&[
             ("mqlc.path", "visits"),
             ("mqlc.presence", "3/3"),
@@ -189,7 +207,7 @@ async fn profiles_nested_paths_arrays_and_embedded_documents_into_mqlc_propertie
     let cost = column(&project, "animals", "visits.cost");
     assert_eq!(cost.r#type, "Int32 | Double");
     assert_eq!(
-        cost.properties,
+        structure(cost),
         props(&[
             ("mqlc.path", "visits.cost"),
             ("mqlc.presence", "3/4"),
@@ -220,9 +238,16 @@ async fn profiles_nested_paths_arrays_and_embedded_documents_into_mqlc_propertie
 async fn samples_the_first_documents_by_id_so_profiles_are_reproducible() {
     let mongo = mongo_with_collections([("animals", animals())]).await;
 
-    let project = profile::profile(&mongo.client, DB_ID, &ProfileOptions { sample_size: 2 })
-        .await
-        .unwrap();
+    let project = profile::profile(
+        &mongo.client,
+        DB_ID,
+        &ProfileOptions {
+            sample_size: 2,
+            ..ProfileOptions::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let animals = &project.mdl.models[0];
     assert_eq!(animals.properties["mqlc.sampled"], 2);
@@ -239,10 +264,16 @@ async fn samples_the_first_documents_by_id_so_profiles_are_reproducible() {
 
 #[tokio::test]
 async fn the_mdl_is_valid_wren_mdl_and_reloads_unchanged() {
-    let mongo = mongo_with_collections([("animals", animals())]).await;
+    let mongo = mongo_with_collections([
+        ("animals", animals()),
+        ("owners", vec![doc! { "_id": "Ann" }]),
+        ("litters", vec![doc! { "_id": 1, "ownerId": "Ann" }]),
+    ])
+    .await;
     let project = profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
         .await
         .unwrap();
+    assert!(!project.mdl.relationships.is_empty());
     let dir = tempfile::tempdir().unwrap();
 
     project.save(dir.path()).unwrap();
@@ -258,4 +289,317 @@ async fn the_mdl_is_valid_wren_mdl_and_reloads_unchanged() {
         .collect();
     assert!(errors.is_empty(), "{errors:#?}");
     assert_eq!(MdlProject::load(dir.path()).unwrap(), project);
+}
+
+#[tokio::test]
+async fn low_cardinality_fields_list_their_whole_value_domain() {
+    let mongo = mongo_with_collections([("animals", animals())]).await;
+
+    let project = profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap();
+
+    // Most frequent first, ties in the order first seen; values keep their
+    // JSON type, and array elements are the field's values.
+    assert_eq!(
+        column(&project, "animals", "name").properties["mqlc.enum"],
+        r#"["Tom","Rex","Kit"]"#
+    );
+    assert_eq!(
+        column(&project, "animals", "weight").properties["mqlc.enum"],
+        r#"[4,30.5,"unknown"]"#
+    );
+    assert_eq!(
+        column(&project, "animals", "tags").properties["mqlc.enum"],
+        r#"["indoor","old"]"#
+    );
+    assert_eq!(
+        column(&project, "animals", "visits.vet").properties["mqlc.enum"],
+        r#"["V1","V2","V3"]"#
+    );
+    assert_eq!(
+        column(&project, "animals", "visits.vet").properties["mqlc.distinct"],
+        "3"
+    );
+    // Nulls are not values; ObjectIds and dates are never enumerated.
+    assert!(
+        !column(&project, "animals", "chip")
+            .properties
+            .contains_key("mqlc.enum")
+    );
+    assert!(
+        !column(&project, "animals", "born")
+            .properties
+            .contains_key("mqlc.enum")
+    );
+}
+
+/// Thirty parts: more distinct values than an enum lists.
+fn parts() -> Vec<mongodb::bson::Document> {
+    (1..=30)
+        .map(|i| {
+            let city = match i {
+                1..=8 => "Oslo".to_string(),
+                9..=11 => "Bergen".to_string(),
+                _ => format!("Town {i}"),
+            };
+            doc! {
+                "_id": i,
+                "code": format!("P-{i:03}"),
+                "serial": i.to_string(),
+                "city": city,
+                "price": i * 10,
+                "made": date(&format!("2020-01-{i:02}T00:00:00Z")),
+                "note": format!("a note far too long to be worth listing as a value, number {i}"),
+                "lot": if i == 1 { Bson::String("L-1".to_string()) } else { Bson::Int32(i) },
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn high_cardinality_fields_give_statistics_common_values_and_format() {
+    let mongo = mongo_with_collections([("parts", parts())]).await;
+
+    let project = profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap();
+
+    let city = column(&project, "parts", "city");
+    assert!(!city.properties.contains_key("mqlc.enum"));
+    assert_eq!(city.properties["mqlc.distinct"], "21");
+    // Up to the five most frequent, with counts: only values seen more than
+    // once are common.
+    assert_eq!(
+        city.properties["mqlc.topValues"],
+        r#"[["Oslo",8],["Bergen",3]]"#
+    );
+    assert!(
+        !column(&project, "parts", "code")
+            .properties
+            .contains_key("mqlc.topValues")
+    );
+    // No one shape covers nine values in ten.
+    assert!(!city.properties.contains_key("mqlc.format"));
+
+    // The exact shape when one covers nine values in ten, else the shape
+    // with runs of any length.
+    assert_eq!(
+        column(&project, "parts", "code").properties["mqlc.format"],
+        r"[A-Z]-\d{3}"
+    );
+    assert_eq!(
+        column(&project, "parts", "serial").properties["mqlc.format"],
+        r"\d+"
+    );
+
+    // A format describes most of the values, not most of the few strings.
+    assert!(
+        !column(&project, "parts", "lot")
+            .properties
+            .contains_key("mqlc.format")
+    );
+
+    let price = column(&project, "parts", "price");
+    assert_eq!(
+        (
+            price.properties["mqlc.min"].as_str(),
+            price.properties["mqlc.max"].as_str()
+        ),
+        ("10", "300")
+    );
+    assert!(!price.properties.contains_key("mqlc.format"));
+
+    let made = column(&project, "parts", "made");
+    assert_eq!(made.properties["mqlc.min"], r#""2020-01-01T00:00:00Z""#);
+    assert_eq!(made.properties["mqlc.max"], r#""2020-01-30T00:00:00Z""#);
+    assert!(!made.properties.contains_key("mqlc.topValues"));
+
+    // Values too long to list are summarized but never shown.
+    let note = column(&project, "parts", "note");
+    assert_eq!(note.properties["mqlc.distinct"], "30");
+    assert!(!note.properties.contains_key("mqlc.topValues"));
+}
+
+#[tokio::test]
+async fn references_by_object_id_or_a_key_named_for_a_collection_become_relationships() {
+    let s1 = ObjectId::new();
+    let s2 = ObjectId::new();
+    let mongo = mongo_with_collections([
+        (
+            "pets",
+            vec![
+                doc! {
+                    "_id": "p1", "ownerId": "o1", "home": s1, "licence": { "id": "L1" },
+                    "visits": [{ "vetId": "V1" }], "toyIds": ["t1", "t2"], "breederId": "b1",
+                    "chipId": "c1", "keeperId": s2,
+                },
+                doc! {
+                    "_id": "p2", "ownerId": "o1", "home": s1, "licence": { "id": "L2" },
+                    "visits": [{ "vetId": "V2" }, { "vetId": "V1" }], "breederId": "b9",
+                },
+                // A copy of the pet's own key is no reference; its mother is.
+                doc! {
+                    "_id": "p3", "ownerId": "o2", "licence": { "id": "L3" }, "petId": "p3",
+                    "motherPetId": "p1",
+                },
+            ],
+        ),
+        ("owners", vec![doc! { "_id": "o1" }, doc! { "_id": "o2" }]),
+        ("shelters", vec![doc! { "_id": s1 }, doc! { "_id": s2 }]),
+        (
+            "licences",
+            vec![
+                doc! { "_id": "L1" },
+                doc! { "_id": "L2" },
+                doc! { "_id": "L3" },
+            ],
+        ),
+        ("vets", vec![doc! { "_id": "V1" }, doc! { "_id": "V2" }]),
+        ("toys", vec![doc! { "_id": "t1" }, doc! { "_id": "t2" }]),
+        // Named for keepers, but its ObjectIds are shelters'.
+        ("keepers", vec![doc! { "_id": "k1" }]),
+        // Half the breeders referred to do not exist: not a reference.
+        ("breeders", vec![doc! { "_id": "b1" }]),
+    ])
+    .await;
+
+    let project = profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap();
+
+    let relationships: Vec<_> = project
+        .mdl
+        .relationships
+        .iter()
+        .map(|r| {
+            (
+                r.name.as_str(),
+                [r.models[0].as_str(), r.models[1].as_str()],
+                serde_json::to_value(r.join_type).unwrap(),
+                r.condition.as_str(),
+                r.properties["mqlc.path"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        relationships,
+        [
+            // Values repeat: many pets to one owner.
+            (
+                "pets.ownerId",
+                ["pets", "owners"],
+                serde_json::json!("MANY_TO_ONE"),
+                "pets.ownerId = owners._id",
+                "ownerId",
+            ),
+            // An ObjectId needs no name to find what it refers to.
+            (
+                "pets.home",
+                ["pets", "shelters"],
+                serde_json::json!("MANY_TO_ONE"),
+                "pets.home = shelters._id",
+                "home",
+            ),
+            // An `id` is named for the field holding it; every value differs.
+            (
+                "pets.licence.id",
+                ["pets", "licences"],
+                serde_json::json!("ONE_TO_ONE"),
+                "pets.licence.id = licences._id",
+                "licence.id",
+            ),
+            // In array elements or arrays: a pet has many.
+            (
+                "pets.visits.vetId",
+                ["pets", "vets"],
+                serde_json::json!("MANY_TO_MANY"),
+                "pets.visits.vetId = vets._id",
+                "visits.vetId",
+            ),
+            (
+                "pets.toyIds",
+                ["pets", "toys"],
+                serde_json::json!("MANY_TO_MANY"),
+                "pets.toyIds = toys._id",
+                "toyIds",
+            ),
+            (
+                "pets.keeperId",
+                ["pets", "shelters"],
+                serde_json::json!("ONE_TO_ONE"),
+                "pets.keeperId = shelters._id",
+                "keeperId",
+            ),
+            (
+                "pets.motherPetId",
+                ["pets", "pets"],
+                serde_json::json!("ONE_TO_ONE"),
+                "pets.motherPetId = pets._id",
+                "motherPetId",
+            ),
+        ]
+    );
+    assert_eq!(
+        project.mdl.relationships[0].properties["mqlc.matched"],
+        "2/2"
+    );
+}
+
+#[tokio::test]
+async fn excluded_fields_are_never_read_and_leave_no_value_in_the_mdl() {
+    let mongo = mongo_with_collections([("animals", animals())]).await;
+    let options = ProfileOptions {
+        exclude: vec![
+            "animals.owner".to_string(),
+            "animals.visits.cost".to_string(),
+        ],
+        ..ProfileOptions::default()
+    };
+
+    let project = profile::profile(&mongo.client, DB_ID, &options)
+        .await
+        .unwrap();
+
+    let animals = &project.mdl.models[0];
+    let columns: Vec<_> = animals.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(columns.contains(&"visits.vet"));
+    assert!(
+        !columns
+            .iter()
+            .any(|c| c.starts_with("owner") || *c == "visits.cost"),
+        "{columns:?}"
+    );
+    // Only the paths are kept, so that they still name fields.
+    assert_eq!(
+        animals.properties["mqlc.excluded"],
+        serde_json::json!(["owner", "visits.cost"])
+    );
+    let dir = tempfile::tempdir().unwrap();
+    project.save(dir.path()).unwrap();
+    let written = std::fs::read_to_string(dir.path().join("mdl.json")).unwrap()
+        + &std::fs::read_to_string(dir.path().join("instructions.json")).unwrap()
+        + &project.render();
+    for value in ["Ann", "Bob", "Oslo", "12.5"] {
+        assert!(!written.contains(value), "{value} leaked");
+    }
+}
+
+#[tokio::test]
+async fn excluding_a_field_that_is_not_there_is_an_error_not_a_silent_leak() {
+    let mongo = mongo_with_collections([("animals", animals())]).await;
+
+    for exclude in ["animals.ownr", "pets.owner", "owner"] {
+        let options = ProfileOptions {
+            exclude: vec![exclude.to_string()],
+            ..ProfileOptions::default()
+        };
+        let err = profile::profile(&mongo.client, DB_ID, &options)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, profile::ProfileError::UnknownExclusion(e) if e == exclude),
+            "{err}"
+        );
+    }
 }

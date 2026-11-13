@@ -4,7 +4,7 @@ use mongodb::bson::{DateTime, doc};
 use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::testing::ScriptedLlm;
 use mqlc_core::{AnswerError, Arm, AskError, Dataset, Engine, Query};
-use support::{DB_ID, dataset_dir, mongo_with, reply};
+use support::{DB_ID, dataset_dir, mongo_with, mongo_with_collections, reply};
 
 #[tokio::test]
 async fn answers_a_question_with_collection_pipeline_and_rows() {
@@ -136,9 +136,15 @@ async fn refuses_pipelines_that_write() {
 #[tokio::test]
 async fn the_auto_mdl_arm_sends_the_profiled_mdl_in_place_of_the_official_description() {
     let data = dataset_dir();
-    let mongo = mongo_with(vec![
-        doc! { "name": "Tom", "species": "cat", "visits": [{ "vet": "V1" }] },
-        doc! { "name": "Rex", "species": "dog" },
+    let mongo = mongo_with_collections([
+        (
+            "animals",
+            vec![
+                doc! { "name": "Tom", "species": "cat", "ownerId": "o1", "visits": [{ "vet": "V1" }] },
+                doc! { "name": "Rex", "species": "dog", "ownerId": "o1" },
+            ],
+        ),
+        ("owners", vec![doc! { "_id": "o1" }]),
     ])
     .await;
     let knowledge = tempfile::tempdir().unwrap();
@@ -166,13 +172,17 @@ async fn the_auto_mdl_arm_sends_the_profiled_mdl_in_place_of_the_official_descri
         "Collection: animals\n",
         r#"{"field_name": "_id", "data_type": "ObjectId"}"#,
         "\n",
-        r#"{"field_name": "name", "data_type": "String"}"#,
+        r#"{"field_name": "name", "data_type": "String", "values": ["Tom","Rex"]}"#,
         "\n",
-        r#"{"field_name": "species", "data_type": "String"}"#,
+        r#"{"field_name": "species", "data_type": "String", "values": ["cat","dog"]}"#,
+        "\n",
+        r#"{"field_name": "ownerId", "data_type": "String", "references": "owners._id"}"#,
         "\n",
         r#"{"field_name": "visits", "data_type": "Array<Document>", "present": "50%"}"#,
         "\n",
-        r#"{"field_name": "visits.vet", "data_type": "String", "in_array": "visits"}"#,
+        r#"{"field_name": "visits.vet", "data_type": "String", "in_array": "visits", "values": ["V1"]}"#,
+        "\n\nCollection: owners\n",
+        r#"{"field_name": "_id", "data_type": "String", "values": ["o1"]}"#,
         "\n\nInstructions:\n- field_name is",
     );
     assert!(
@@ -183,6 +193,54 @@ async fn the_auto_mdl_arm_sends_the_profiled_mdl_in_place_of_the_official_descri
     assert!(request.context.ends_with("</MongoDB Schema Description>"));
     assert!(!request.context.contains("Pet name"));
     assert_eq!(engine.arm().name(), "auto-mdl");
+}
+
+#[tokio::test]
+async fn the_auto_mdl_summarizes_fields_with_too_many_values_to_list() {
+    let data = dataset_dir();
+    let mongo = mongo_with(
+        (1..=30)
+            .map(|i| {
+                let name = match i {
+                    1..=5 => "Tom".to_string(),
+                    6..=8 => "Kit".to_string(),
+                    _ => format!("Pet {i}"),
+                };
+                doc! {
+                    "_id": i, "name": name, "chip": format!("CH-{i:04}"), "weight": i * 2,
+                    "born": DateTime::from_millis(i64::from(i) * 86_400_000),
+                }
+            })
+            .collect(),
+    )
+    .await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::AutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let context = &engine.llm().requests()[0].context;
+    for line in [
+        r#"{"field_name": "name", "data_type": "String", "common_values": ["Tom","Kit"]}"#,
+        r#"{"field_name": "chip", "data_type": "String", "format": "[A-Z]{2}-\\d{4}"}"#,
+        r#"{"field_name": "weight", "data_type": "Int32", "min": 2, "max": 60}"#,
+        r#"{"field_name": "born", "data_type": "Date", "min": "1970-01-02T00:00:00Z", "max": "1970-01-31T00:00:00Z"}"#,
+    ] {
+        assert!(context.contains(line), "{line} not in {context}");
+    }
 }
 
 #[tokio::test]

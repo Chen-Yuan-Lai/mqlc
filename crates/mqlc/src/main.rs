@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -140,6 +141,13 @@ enum Command {
         /// Documents read per collection, the first ones in `_id` order.
         #[arg(long, default_value_t = ProfileOptions::default().sample_size)]
         sample_size: usize,
+
+        /// A sensitive field to leave out, as <db>.<collection>.<path>, with
+        /// everything under it: its values are never read, and the MDL keeps
+        /// only its path. Repeatable; naming a field that is not there is an
+        /// error.
+        #[arg(long, value_name = "DB.COLLECTION.PATH")]
+        exclude: Vec<String>,
     },
     /// Report, per split, how many gold pipelines the IR represents without a
     /// raw stage, and what the rest need. Calls no LLM and no database.
@@ -189,6 +197,7 @@ async fn main() -> Result<()> {
         split,
         db,
         sample_size,
+        exclude,
     } = &cli.command
     {
         let mut db_ids: Vec<&str> = dataset
@@ -201,10 +210,22 @@ async fn main() -> Result<()> {
         db_ids.sort();
         db_ids.dedup();
         anyhow::ensure!(!db_ids.is_empty(), "no database matches");
-        let options = ProfileOptions {
-            sample_size: *sample_size,
-        };
+        let mut excluded: HashMap<&str, Vec<String>> = HashMap::new();
+        for e in exclude {
+            let (db_id, field) = e
+                .split_once('.')
+                .with_context(|| format!("--exclude {e}: expected <db>.<collection>.<path>"))?;
+            anyhow::ensure!(
+                dataset.samples().iter().any(|s| s.db_id == db_id),
+                "--exclude {e}: no database {db_id}"
+            );
+            excluded.entry(db_id).or_default().push(field.to_string());
+        }
         for db_id in db_ids {
+            let options = ProfileOptions {
+                sample_size: *sample_size,
+                exclude: excluded.get(db_id).cloned().unwrap_or_default(),
+            };
             let project = profile::profile(&mongo, db_id, &options)
                 .await
                 .with_context(|| format!("profiling {db_id}"))?;

@@ -41,7 +41,7 @@ pub struct Mdl {
     pub schema: String,
     pub models: Vec<Model>,
     #[serde(default)]
-    pub relationships: Vec<serde_json::Value>,
+    pub relationships: Vec<Relationship>,
 }
 
 /// A collection.
@@ -71,6 +71,29 @@ pub struct Column {
     pub not_null: bool,
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+}
+
+/// A reference from a field of one model to another model's `_id`. Its
+/// `mqlc.path` property is the referring field's path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Relationship {
+    pub name: String,
+    /// The referring model, then the referred one.
+    pub models: Vec<String>,
+    pub join_type: JoinType,
+    pub condition: String,
+    #[serde(default)]
+    pub properties: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum JoinType {
+    OneToOne,
+    OneToMany,
+    ManyToOne,
+    ManyToMany,
 }
 
 /// A note for the model, in WrenAI's instruction shape.
@@ -114,10 +137,30 @@ impl MdlProject {
     pub fn render(&self) -> String {
         let mut models: Vec<&Model> = self.mdl.models.iter().collect();
         models.sort_by(|a, b| a.name.cmp(&b.name));
+        // (model, path) -> the `_id` it refers to.
+        let references: BTreeMap<(&str, &str), String> = self
+            .mdl
+            .relationships
+            .iter()
+            .filter_map(|r| {
+                let path = r.properties.get("mqlc.path")?.as_str()?;
+                let [from, to] = r.models.as_slice() else {
+                    return None;
+                };
+                Some(((from.as_str(), path), format!("{to}._id")))
+            })
+            .collect();
         let mut parts: Vec<String> = models
             .into_iter()
             .map(|m| {
-                let lines: Vec<String> = m.columns.iter().map(render_column).collect();
+                let lines: Vec<String> = m
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        let path = c.properties.get("mqlc.path").unwrap_or(&c.name);
+                        render_column(c, references.get(&(m.name.as_str(), path.as_str())))
+                    })
+                    .collect();
                 format!("Collection: {}\n{}", m.name, lines.join("\n"))
             })
             .collect();
@@ -134,9 +177,13 @@ impl MdlProject {
 }
 
 /// `{"field_name", "data_type", ...}` with arrays shown as `Array<element
-/// types>`, and presence only when the field is sometimes missing.
-fn render_column(c: &Column) -> String {
+/// types>`, presence only when the field is sometimes missing, the `_id` it
+/// refers to (if any, instead of its values), then its values: all of them,
+/// or their format, range and most common ones.
+fn render_column(c: &Column, references: Option<&String>) -> String {
+    use serde_json::Value;
     let prop = |k: &str| c.properties.get(k).map(String::as_str);
+    let parsed = |k: &str| prop(k).and_then(|v| serde_json::from_str::<Value>(v).ok());
     let path = prop("mqlc.path").unwrap_or(&c.name);
     let data_type = match prop("mqlc.elementTypes") {
         Some(elements) => c
@@ -150,18 +197,48 @@ fn render_column(c: &Column) -> String {
             .join(" | "),
         None => c.r#type.clone(),
     };
-    let mut line = vec![("field_name", path.to_string()), ("data_type", data_type)];
+    let mut line: Vec<(&str, Value)> =
+        vec![("field_name", path.into()), ("data_type", data_type.into())];
     if let Some(array) = prop("mqlc.inArray") {
-        line.push(("in_array", array.to_string()));
+        line.push(("in_array", array.into()));
     }
     if let Some(present) = prop("mqlc.presence").and_then(render_presence) {
-        line.push(("present", present));
+        line.push(("present", present.into()));
     }
-    // Spaced like the official description files.
-    let json = |s: &str| serde_json::to_string(s).expect("strings serialize");
+    // The ids a reference holds say nothing its target does not.
+    if let Some(to) = references {
+        line.push(("references", to.as_str().into()));
+        return render_line(&line);
+    }
+    if let Some(values) = parsed("mqlc.enum") {
+        line.push(("values", values));
+    }
+    if let Some(format) = prop("mqlc.format") {
+        line.push(("format", format.into()));
+    }
+    for (key, prop) in [("min", "mqlc.min"), ("max", "mqlc.max")] {
+        if let Some(v) = parsed(prop) {
+            line.push((key, v));
+        }
+    }
+    // `[[value, count], ...]`: the values alone.
+    if let Some(Value::Array(top)) = parsed("mqlc.topValues") {
+        let values = top
+            .into_iter()
+            .filter_map(|pair| pair.as_array()?.first().cloned())
+            .collect();
+        line.push(("common_values", Value::Array(values)));
+    }
+    render_line(&line)
+}
+
+/// Spaced like the official description files.
+fn render_line(line: &[(&str, serde_json::Value)]) -> String {
+    use serde_json::Value;
+    let json = |v: &Value| serde_json::to_string(v).expect("JSON serializes");
     let pairs: Vec<String> = line
         .iter()
-        .map(|(k, v)| format!("{}: {}", json(k), json(v)))
+        .map(|(k, v)| format!("{}: {}", json(&(*k).into()), json(v)))
         .collect();
     format!("{{{}}}", pairs.join(", "))
 }
