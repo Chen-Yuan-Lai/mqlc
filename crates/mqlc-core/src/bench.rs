@@ -2,7 +2,7 @@
 //! to `results.jsonl` in a run directory, either one call at a time or
 //! through the asynchronous batch API.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,14 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::dataset::Sample;
 use crate::engine::{Answer, Engine, Settings};
 use crate::llm::{ANTHROPIC_CONTEXT_WINDOW, BatchPoll, LlmClient, LlmRequest, Usage, with_retries};
+use crate::mdl::MdlError;
 use crate::pricing;
 
 const RESULTS: &str = "results.jsonl";
 const MANIFEST: &str = "manifest.json";
 /// Batches submitted for the run, so a later invocation collects them.
 const BATCHES: &str = "batches.json";
-/// The only arm until knowledge arms land.
-const ARM: &str = "official";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BenchError {
@@ -48,6 +47,8 @@ pub enum BenchError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("cannot load the arm's knowledge: {0}")]
+    Knowledge(#[from] MdlError),
     #[error("{path} line {line} is not a valid record: {source}")]
     Corrupt {
         path: PathBuf,
@@ -155,6 +156,10 @@ pub struct RunConfig {
     #[serde(flatten)]
     pub settings: Settings,
     pub prompt_hash: String,
+    /// Hash of the arm's knowledge (the auto MDL) per database, when the
+    /// dataset does not fix it. A rerun may add databases but not change one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub knowledge: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,15 +211,17 @@ pub async fn run<L: LlmClient>(
     };
     fs::create_dir_all(run_dir).map_err(io)?;
     let model = engine.llm().model().to_string();
+    let arm = engine.arm().name().to_string();
     record_invocation(
         &run_dir.join(MANIFEST),
         RunConfig {
-            arm: ARM.to_string(),
+            arm: arm.clone(),
             model: model.clone(),
             backend: engine.llm().backend().to_string(),
             context_window: engine.llm().context_window(),
             settings: engine.settings(),
             prompt_hash: engine.dataset().prompt().hash().to_string(),
+            knowledge: engine.knowledge_hashes(samples.iter().map(|s| s.db_id.as_str()))?,
         },
         engine.llm().endpoint(),
         options.mode,
@@ -225,6 +232,7 @@ pub async fn run<L: LlmClient>(
     let mut rec = Recorder {
         file: open_append(&results_path).map_err(io)?,
         path: run_dir.to_path_buf(),
+        arm,
         model,
         done: earlier.iter().map(Key::of).collect(),
         on_progress,
@@ -395,6 +403,7 @@ async fn run_batch<L: LlmClient>(
 struct Recorder<F> {
     file: File,
     path: PathBuf,
+    arm: String,
     model: String,
     done: HashSet<Key>,
     on_progress: F,
@@ -404,7 +413,7 @@ struct Recorder<F> {
 impl<F: FnMut(Progress)> Recorder<F> {
     fn is_done(&self, sample: &Sample) -> bool {
         self.done.contains(&Key {
-            arm: ARM.to_string(),
+            arm: self.arm.clone(),
             model: self.model.clone(),
             sample_id: sample.sample_id.clone(),
             candidate: 0,
@@ -413,7 +422,7 @@ impl<F: FnMut(Progress)> Recorder<F> {
 
     fn write(&mut self, sample: &Sample, answer: Answer, batch: bool) -> Result<(), BenchError> {
         let record = Record {
-            arm: ARM.to_string(),
+            arm: self.arm.clone(),
             model: self.model.clone(),
             sample_id: sample.sample_id.clone(),
             candidate: 0,
@@ -572,7 +581,17 @@ fn record_invocation(
                     path: path.to_path_buf(),
                     source,
                 })?;
-            if manifest.config != config {
+            let changed_knowledge = config
+                .knowledge
+                .iter()
+                .any(|(db, hash)| manifest.config.knowledge.get(db).is_some_and(|h| h != hash));
+            let without_knowledge = |c: &RunConfig| RunConfig {
+                knowledge: BTreeMap::new(),
+                ..c.clone()
+            };
+            if changed_knowledge
+                || without_knowledge(&manifest.config) != without_knowledge(&config)
+            {
                 let show = |c: &RunConfig| serde_json::to_string(c).expect("config serializes");
                 return Err(BenchError::ConfigMismatch {
                     path: path.to_path_buf(),
@@ -580,6 +599,8 @@ fn record_invocation(
                     now: show(&config),
                 });
             }
+            let mut manifest = manifest;
+            manifest.config.knowledge.extend(config.knowledge);
             manifest
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest {

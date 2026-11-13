@@ -5,9 +5,10 @@ use std::path::Path;
 
 use mongodb::bson::doc;
 use mqlc_core::bench::{self, Mode, Options, Progress, Record};
+use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::testing::{Scripted, ScriptedLlm};
-use mqlc_core::{Dataset, Engine, Usage};
-use support::{dataset_dir, mongo_with, reply};
+use mqlc_core::{Arm, Dataset, Engine, Usage};
+use support::{DB_ID, dataset_dir, mongo_with, reply};
 
 fn records(run_dir: &Path) -> Vec<Record> {
     fs::read_to_string(run_dir.join("results.jsonl"))
@@ -657,4 +658,156 @@ async fn questions_whose_prompt_exceeds_the_context_window_are_recorded_as_skipp
         assert_eq!(manifest["invocations"][0]["endpoint"], "scripted");
     }
     assert!(api.requests().is_empty() && api.batches().is_empty());
+}
+
+#[tokio::test]
+async fn an_auto_mdl_run_records_its_arm_and_refuses_to_resume_once_the_mdl_changes() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let knowledge = tempfile::tempdir().unwrap();
+    let save_profile = || async {
+        profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+            .await
+            .unwrap()
+            .save(&knowledge.path().join(DB_ID))
+            .unwrap();
+    };
+    save_profile().await;
+    let arm = Arm::AutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    };
+    let engine = |replies: Vec<String>| {
+        Engine::new(
+            ScriptedLlm::new(replies),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+        .with_arm(arm.clone())
+    };
+    let run_dir = tempfile::tempdir().unwrap();
+    let first = engine(vec![reply("animals", r#"[{"$count": "n"}]"#)]);
+    let samples = first.dataset().samples()[..1].to_vec();
+
+    bench::run(
+        &first,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(records(run_dir.path())[0].arm, "auto-mdl");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["config"]["arm"], "auto-mdl");
+    assert!(
+        manifest["config"]["knowledge"][DB_ID]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+
+    // An unchanged MDL resumes: the answered sample is skipped.
+    let again = bench::run(
+        &engine(Vec::new()),
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.skipped, 1);
+
+    // A re-profile that sees a new field changes what the prompt says.
+    mongo
+        .client
+        .database(DB_ID)
+        .collection("animals")
+        .insert_one(doc! { "name": "Rex", "chip": "A1" })
+        .await
+        .unwrap();
+    save_profile().await;
+    let err = bench::run(
+        &engine(Vec::new()),
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, bench::BenchError::ConfigMismatch { .. }),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn an_auto_mdl_run_resumes_over_more_databases_than_it_started_with() {
+    let data = dataset_dir();
+    // A second database, profiled like the first.
+    let zoo = r#"{"split": "dev", "db_id": "zoo", "question": "How many keepers?", "evidence": "", "mongodb_evidence": "", "question_id": 9, "sample_id": "dev_9", "SQL": "", "MQL": {"collection": "keepers", "aggregation_pipeline": [{"$count": "n"}]}}"#;
+    let path = data.path().join("aptmqlbench_data.jsonl");
+    fs::write(&path, fs::read_to_string(&path).unwrap() + zoo + "\n").unwrap();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    mongo
+        .client
+        .database("zoo")
+        .collection("keepers")
+        .insert_one(doc! { "name": "Ann" })
+        .await
+        .unwrap();
+    let knowledge = tempfile::tempdir().unwrap();
+    for db_id in [DB_ID, "zoo"] {
+        profile::profile(&mongo.client, db_id, &ProfileOptions::default())
+            .await
+            .unwrap()
+            .save(&knowledge.path().join(db_id))
+            .unwrap();
+    }
+    let engine = |replies: Vec<String>| {
+        Engine::new(
+            ScriptedLlm::new(replies),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+        .with_arm(Arm::AutoMdl {
+            dir: knowledge.path().to_path_buf(),
+        })
+    };
+    let run_dir = tempfile::tempdir().unwrap();
+    let count = || reply("animals", r#"[{"$count": "n"}]"#);
+    let smoke = engine(vec![count()]);
+    let all = smoke.dataset().samples().to_vec();
+
+    // A smoke run on the first database, then the whole set.
+    bench::run(
+        &smoke,
+        run_dir.path(),
+        &all[..1],
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let summary = bench::run(
+        &engine(vec![count(), reply("keepers", r#"[{"$count": "n"}]"#)]),
+        run_dir.path(),
+        &all,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!((summary.skipped, summary.completed), (1, 2));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.path().join("manifest.json")).unwrap())
+            .unwrap();
+    let hashes = manifest["config"]["knowledge"].as_object().unwrap();
+    assert_eq!(hashes.keys().collect::<Vec<_>>(), [DB_ID, "zoo"]);
 }

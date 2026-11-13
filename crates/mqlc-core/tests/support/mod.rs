@@ -1,3 +1,6 @@
+// Each test binary uses only some of these helpers.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::Path;
 
@@ -78,6 +81,13 @@ pub struct Mongo {
 }
 
 pub async fn mongo_with(docs: Vec<Document>) -> Mongo {
+    mongo_with_collections([("animals", docs)]).await
+}
+
+/// MongoDB with database `DB_ID` holding these collections.
+pub async fn mongo_with_collections(
+    collections: impl IntoIterator<Item = (&str, Vec<Document>)>,
+) -> Mongo {
     let container = GenericImage::new("mongo", "8.2")
         .with_exposed_port(27017.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Waiting for connections"))
@@ -88,12 +98,14 @@ pub async fn mongo_with(docs: Vec<Document>) -> Mongo {
     let client = Client::with_uri_str(format!("mongodb://127.0.0.1:{port}/?directConnection=true"))
         .await
         .unwrap();
-    client
-        .database(DB_ID)
-        .collection::<Document>("animals")
-        .insert_many(docs)
-        .await
-        .unwrap();
+    for (name, docs) in collections {
+        client
+            .database(DB_ID)
+            .collection::<Document>(name)
+            .insert_many(docs)
+            .await
+            .unwrap();
+    }
     Mongo {
         client,
         _container: container,

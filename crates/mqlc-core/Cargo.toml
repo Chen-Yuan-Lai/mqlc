@@ -20,6 +20,7 @@ tokio = { version = "1.54.1", features = ["time"] }
 testing = []
 
 [dev-dependencies]
+jsonschema = { version = "0.61.2", default-features = false }
 mqlc-core = { path = ".", features = ["testing"] }
 tempfile = "3.27.0"
 testcontainers = "0.28.0"

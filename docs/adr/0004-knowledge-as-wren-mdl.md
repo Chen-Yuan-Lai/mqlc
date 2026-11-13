@@ -1,3 +1,5 @@
 # Knowledge 以 Wren MDL 表示，MongoDB 專屬資訊放 mqlc 命名空間
 
 Profile 的結果和人工補寫的定義都存成 Wren MDL 專案（models、relationships、instructions），而不是自訂格式。MDL 已經是給 LLM 讀的語意層格式，人工可以直接編輯，也能和 Wren 生態互通；代價是它源自關聯式模型，表達不了巢狀路徑、陣列、嵌入文件。這些資訊放在 model / column properties 的 `mqlc` 命名空間（例如 `mqlc.path`、`mqlc.array`、`mqlc.embedded`），檔案仍是合法的 MDL。
+
+一個資料庫的 MDL 專案是一個目錄：`mdl.json` 是 Wren MDL（`catalog`、`schema`、`models`、`relationships`；Wren 沒有 MongoDB 的 `dataSource`，所以不寫），`instructions.json` 是 WrenAI 形狀的 instruction 清單（`[{"instruction": ...}]`），因為 Wren 的 MDL schema 不允許頂層多出其他欄位。每個 collection 是一個 model，每個欄位路徑是一個 column（`name` 是點分隔的路徑）。Wren 規定 column properties 的值只能是字串，所以布林與數字也寫成字串：`mqlc.path`、`mqlc.presence`（`出現次數/外層文件數`，外層文件是 collection 的文件、嵌入文件或陣列元素；存次數而不是四捨五入的比例，才不會把很少見或幾乎都有的欄位寫成 0% 或 100%）、`mqlc.types`（各 BSON 型別的次數）、`mqlc.array`、`mqlc.elementTypes`、`mqlc.embedded`、`mqlc.inArray`（最內層的外圍陣列路徑）。Column 的 `notNull` 表示每份抽樣文件都有這個欄位且不為 null：外層欄位可能缺少或為 null、或欄位在陣列元素裡（陣列可能是空的）時都是 false。Model properties 可以是任意 JSON：`mqlc.sampled`、`mqlc.documents`。放進 prompt 時，MDL 以官方說明的版面 render（每個 collection 一行 `Collection: <name>`，每個欄位一行 JSON），讓 arm 之間只差內容、不差形狀。

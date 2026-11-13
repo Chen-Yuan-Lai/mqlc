@@ -1,9 +1,10 @@
 mod support;
 
 use mongodb::bson::{DateTime, doc};
+use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::testing::ScriptedLlm;
-use mqlc_core::{AnswerError, Dataset, Engine, Query};
-use support::{dataset_dir, mongo_with, reply};
+use mqlc_core::{AnswerError, Arm, AskError, Dataset, Engine, Query};
+use support::{DB_ID, dataset_dir, mongo_with, reply};
 
 #[tokio::test]
 async fn answers_a_question_with_collection_pipeline_and_rows() {
@@ -130,4 +131,77 @@ async fn refuses_pipelines_that_write() {
         .await
         .unwrap();
     assert_eq!(collections, ["animals"]);
+}
+
+#[tokio::test]
+async fn the_auto_mdl_arm_sends_the_profiled_mdl_in_place_of_the_official_description() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![
+        doc! { "name": "Tom", "species": "cat", "visits": [{ "vet": "V1" }] },
+        doc! { "name": "Rex", "species": "dog" },
+    ])
+    .await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::AutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let request = &engine.llm().requests()[0];
+    let expected_start = concat!(
+        "<MongoDB Schema Description>\n\n",
+        "Collection: animals\n",
+        r#"{"field_name": "_id", "data_type": "ObjectId"}"#,
+        "\n",
+        r#"{"field_name": "name", "data_type": "String"}"#,
+        "\n",
+        r#"{"field_name": "species", "data_type": "String"}"#,
+        "\n",
+        r#"{"field_name": "visits", "data_type": "Array<Document>", "present": "50%"}"#,
+        "\n",
+        r#"{"field_name": "visits.vet", "data_type": "String", "in_array": "visits"}"#,
+        "\n\nInstructions:\n- field_name is",
+    );
+    assert!(
+        request.context.starts_with(expected_start),
+        "{}",
+        request.context
+    );
+    assert!(request.context.ends_with("</MongoDB Schema Description>"));
+    assert!(!request.context.contains("Pet name"));
+    assert_eq!(engine.arm().name(), "auto-mdl");
+}
+
+#[tokio::test]
+async fn a_database_with_no_auto_mdl_is_an_error_not_an_answer() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let empty = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::AutoMdl {
+        dir: empty.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    let err = engine.ask(&sample).await.unwrap_err();
+
+    assert!(matches!(err, AskError::Knowledge(_)), "{err}");
+    assert!(engine.llm().requests().is_empty());
 }

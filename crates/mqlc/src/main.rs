@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use mqlc_core::engine;
 use mqlc_core::mongodb::bson::{Bson, Document};
+use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::{
-    AnswerError, AnthropicClient, Dataset, Engine, LlmClient, OpenAiClient, Sample, bench, ir,
+    AnswerError, AnthropicClient, Arm, Dataset, Engine, LlmClient, OpenAiClient, Sample, bench, ir,
 };
 
 #[derive(Parser)]
@@ -60,8 +62,23 @@ struct Cli {
     #[arg(long, env = "MQLC_CONTEXT_WINDOW", global = true)]
     context_window: Option<u32>,
 
+    /// Knowledge in the prompt: the official schema description, or the auto
+    /// MDL that `mqlc profile` wrote to --mdl-dir in its place.
+    #[arg(long, value_enum, default_value_t = ArmArg::Official, global = true)]
+    arm: ArmArg,
+
+    /// Auto MDL projects, one directory per database (`mqlc profile --out`).
+    #[arg(long, env = "MQLC_MDL_DIR", default_value = "mdl/auto", global = true)]
+    mdl_dir: PathBuf,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ArmArg {
+    Official,
+    AutoMdl,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -110,6 +127,20 @@ enum Command {
         #[arg(long, default_value_t = 80.0)]
         spend_limit: f64,
     },
+    /// Profile databases into auto MDL projects under --mdl-dir, one
+    /// directory per database. Calls no LLM; rerunning overwrites them.
+    Profile {
+        #[arg(long, value_enum, default_value_t = SplitArg::All)]
+        split: SplitArg,
+
+        /// Only this database, e.g. restaurant.
+        #[arg(long)]
+        db: Option<String>,
+
+        /// Documents read per collection, the first ones in `_id` order.
+        #[arg(long, default_value_t = ProfileOptions::default().sample_size)]
+        sample_size: usize,
+    },
     /// Report, per split, how many gold pipelines the IR represents without a
     /// raw stage, and what the rest need. Calls no LLM and no database.
     IrCoverage,
@@ -154,12 +185,53 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let mongo = mqlc_core::mongodb::Client::with_uri_str(&cli.mongo_uri).await?;
+    if let Command::Profile {
+        split,
+        db,
+        sample_size,
+    } = &cli.command
+    {
+        let mut db_ids: Vec<&str> = dataset
+            .samples()
+            .iter()
+            .filter(|s| split.includes(&s.split))
+            .filter(|s| db.as_ref().is_none_or(|db| &s.db_id == db))
+            .map(|s| s.db_id.as_str())
+            .collect();
+        db_ids.sort();
+        db_ids.dedup();
+        anyhow::ensure!(!db_ids.is_empty(), "no database matches");
+        let options = ProfileOptions {
+            sample_size: *sample_size,
+        };
+        for db_id in db_ids {
+            let project = profile::profile(&mongo, db_id, &options)
+                .await
+                .with_context(|| format!("profiling {db_id}"))?;
+            let dir = cli.mdl_dir.join(db_id);
+            project.save(&dir)?;
+            let columns: usize = project.mdl.models.iter().map(|m| m.columns.len()).sum();
+            eprintln!(
+                "{db_id:<24} {:>3} collections {columns:>5} fields  ~{} prompt tokens  -> {}",
+                project.mdl.models.len(),
+                engine::estimate_tokens(&project.render()),
+                dir.display()
+            );
+        }
+        return Ok(());
+    }
+    let arm = match cli.arm {
+        ArmArg::Official => Arm::Official,
+        ArmArg::AutoMdl => Arm::AutoMdl {
+            dir: cli.mdl_dir.clone(),
+        },
+    };
     match cli.backend {
         BackendArg::Anthropic => {
             let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
             let model = cli.model.unwrap_or_else(|| "claude-haiku-4-5".to_string());
             let llm = AnthropicClient::new(key, model);
-            run(cli.command, Engine::new(llm, mongo, dataset)).await
+            run(cli.command, Engine::new(llm, mongo, dataset).with_arm(arm)).await
         }
         BackendArg::Openai => {
             let window = cli
@@ -170,7 +242,7 @@ async fn main() -> Result<()> {
                 .context("--model is required with --backend openai")?;
             let key = std::env::var("OPENAI_API_KEY").ok();
             let llm = OpenAiClient::new(cli.base_url, key, model, window);
-            run(cli.command, Engine::new(llm, mongo, dataset)).await
+            run(cli.command, Engine::new(llm, mongo, dataset).with_arm(arm)).await
         }
     }
 }
@@ -291,7 +363,9 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 std::process::exit(2);
             }
         }
-        Command::IrCoverage => unreachable!("handled before connecting"),
+        Command::IrCoverage | Command::Profile { .. } => {
+            unreachable!("handled before choosing a backend")
+        }
     }
     Ok(())
 }

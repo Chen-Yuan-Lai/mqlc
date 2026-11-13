@@ -1,5 +1,8 @@
 //! The single-question API: question → prompt → LLM → pipeline → rows.
 
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
@@ -7,8 +10,9 @@ use mongodb::Client;
 use mongodb::bson::Document;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{Dataset, DatasetError, Sample};
+use crate::dataset::{Dataset, DatasetError, Sample, sha256};
 use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Usage, with_retries};
+use crate::mdl::{MdlError, MdlProject};
 use crate::reply::{ParseError, parse_reply};
 
 const MAX_TOKENS: u32 = 4096;
@@ -21,6 +25,10 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum AskError {
     #[error(transparent)]
     Dataset(#[from] DatasetError),
+    /// The arm's knowledge is missing or broken: a setup failure, like a
+    /// missing dataset file.
+    #[error("cannot load knowledge: {0}")]
+    Knowledge(#[from] MdlError),
     #[error("LLM call failed: {0}")]
     Llm(#[from] LlmError),
     #[error("database unavailable: {0}")]
@@ -88,10 +96,34 @@ pub struct Settings {
     pub ir: bool,
 }
 
+/// Where the schema knowledge in the prompt comes from (experiment A).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Arm {
+    /// The official schema description, the paper's baseline.
+    Official,
+    /// The auto MDL that `mqlc profile` wrote to `dir/<db_id>/`, in place of
+    /// the official description.
+    AutoMdl { dir: PathBuf },
+}
+
+impl Arm {
+    /// The arm's name in records and manifests.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Official => "official",
+            Self::AutoMdl { .. } => "auto-mdl",
+        }
+    }
+}
+
 pub struct Engine<L> {
     llm: L,
     mongo: Client,
     dataset: Dataset,
+    arm: Arm,
+    /// Rendered MDL per database, loaded once so every prompt of a run
+    /// matches the hash in its manifest.
+    mdl: Mutex<HashMap<String, String>>,
 }
 
 impl<L: LlmClient> Engine<L> {
@@ -100,7 +132,18 @@ impl<L: LlmClient> Engine<L> {
             llm,
             mongo,
             dataset,
+            arm: Arm::Official,
+            mdl: Mutex::default(),
         }
+    }
+
+    pub fn with_arm(mut self, arm: Arm) -> Self {
+        self.arm = arm;
+        self
+    }
+
+    pub fn arm(&self) -> &Arm {
+        &self.arm
     }
 
     pub fn dataset(&self) -> &Dataset {
@@ -121,7 +164,7 @@ impl<L: LlmClient> Engine<L> {
         }
     }
 
-    /// Answers one question with the official prompt and schema description
+    /// Answers one question with the official prompt and the arm's knowledge
     /// (no evidence), at temperature 0.
     pub async fn ask(&self, sample: &Sample) -> Result<Answer, AskError> {
         let request = self.request(sample)?;
@@ -139,12 +182,12 @@ impl<L: LlmClient> Engine<L> {
 
     /// The answer for a request whose prompt, with room for the longest
     /// reply, does not fit the backend's context window; such a request is
-    /// not sent. Prompt tokens are estimated at 3 bytes a token, which
-    /// overestimates (English runs near 4) so that a prompt near the limit is
-    /// skipped rather than silently truncated.
+    /// not sent (see `estimate_tokens`).
     pub fn overflow_answer(&self, request: &LlmRequest) -> Option<Answer> {
-        let bytes = request.system.len() + request.context.len() + request.user.len();
-        let estimated = bytes.div_ceil(3) as u64;
+        let estimated = [&request.system, &request.context, &request.user]
+            .into_iter()
+            .map(|text| estimate_tokens(text))
+            .sum();
         let window = self.llm.context_window();
         (estimated + u64::from(request.max_tokens) > u64::from(window)).then(|| Answer {
             reply: String::new(),
@@ -155,12 +198,45 @@ impl<L: LlmClient> Engine<L> {
         })
     }
 
+    /// A hash per database of the knowledge the arm sends for it, recorded in
+    /// run manifests so a run does not resume on different knowledge. Empty
+    /// for the official description, which the dataset revision fixes.
+    pub fn knowledge_hashes<'a>(
+        &self,
+        db_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeMap<String, String>, MdlError> {
+        if self.arm == Arm::Official {
+            return Ok(BTreeMap::new());
+        }
+        db_ids
+            .into_iter()
+            .map(|db_id| Ok((db_id.to_string(), sha256(self.mdl(db_id)?.as_bytes()))))
+            .collect()
+    }
+
+    /// The auto MDL of `db_id`, rendered for the prompt.
+    fn mdl(&self, db_id: &str) -> Result<String, MdlError> {
+        let Arm::AutoMdl { dir } = &self.arm else {
+            unreachable!("only the auto-mdl arm has an MDL")
+        };
+        let mut cache = self.mdl.lock().unwrap();
+        if let Some(text) = cache.get(db_id) {
+            return Ok(text.clone());
+        }
+        let text = MdlProject::load(&dir.join(db_id))?.render();
+        cache.insert(db_id.to_string(), text.clone());
+        Ok(text)
+    }
+
     /// The LLM request that `ask` sends for `sample`.
     pub fn request(&self, sample: &Sample) -> Result<LlmRequest, AskError> {
         let prompt = self.dataset.prompt();
-        let schema = self
-            .dataset
-            .schema_description(&sample.split, &sample.db_id)?;
+        let schema = match &self.arm {
+            Arm::Official => self
+                .dataset
+                .schema_description(&sample.split, &sample.db_id)?,
+            Arm::AutoMdl { .. } => self.mdl(&sample.db_id)?,
+        };
         Ok(LlmRequest {
             system: prompt.system.clone(),
             context: prompt.schema_block(&schema),
@@ -237,6 +313,13 @@ impl<L: LlmClient> Engine<L> {
             Err(e) => Ok(Err(AnswerError::Mongo(e))),
         }
     }
+}
+
+/// Tokens of prompt text, at 3 bytes a token. That overestimates (English
+/// runs near 4), so a prompt near the context limit is skipped rather than
+/// silently truncated.
+pub fn estimate_tokens(text: &str) -> u64 {
+    text.len().div_ceil(3) as u64
 }
 
 /// Errors that say nothing about the query: the server is unreachable or

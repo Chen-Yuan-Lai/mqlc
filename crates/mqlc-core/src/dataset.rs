@@ -78,12 +78,7 @@ impl OfficialPrompt {
             schema: template("SCHEMA_PROMPT")?,
             question: template("QUESTION_PROMPT")?,
             evidence: template("EVIDENCE_SECTION")?,
-            hash: Sha256::digest(text.as_bytes())
-                .iter()
-                .fold("sha256:".to_string(), |mut h, b| {
-                    h.push_str(&format!("{b:02x}"));
-                    h
-                }),
+            hash: sha256(text.as_bytes()),
         })
     }
 
@@ -187,6 +182,16 @@ impl Dataset {
             .collect::<Result<Vec<_>, DatasetError>>()?;
         Ok(parts.join("\n\n"))
     }
+}
+
+/// `sha256:<hex>`, the form hashes take in run manifests.
+pub(crate) fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold("sha256:".to_string(), |mut h, b| {
+            h.push_str(&format!("{b:02x}"));
+            h
+        })
 }
 
 fn string_or_int<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {

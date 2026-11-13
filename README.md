@@ -5,7 +5,7 @@ Schema-aware, verifiable NL → MongoDB query compiler, evaluated on
 
 Workspace:
 
-- `mqlc-core`: all logic (dataset access, prompt assembly, LLM backends, reply parsing, execution)
+- `mqlc-core`: all logic (dataset access, schema profiler, prompt assembly, LLM backends, reply parsing, execution)
 - `mqlc`: CLI
 - `mqlc-mcp`: MCP server (not implemented yet)
 
@@ -67,6 +67,8 @@ are refused before they reach the database.
 | `--data-dir` | `MQLC_DATA_DIR` | `data/AptMQL-Bench` |
 | `--mongo-uri` | `MQLC_MONGO_URI` | `mongodb://mqlc:mqlc@localhost:27017/?authSource=admin` |
 | `--model` | `MQLC_MODEL` | `claude-haiku-4-5` |
+| `--arm` | | `official` (or `auto-mdl`, see [Auto MDL](#auto-mdl)) |
+| `--mdl-dir` | `MQLC_MDL_DIR` | `mdl/auto` |
 | `--max-rows` | | `20` |
 
 ### Other backends
@@ -144,6 +146,33 @@ results with the official `eval_script.py`, writing `scores.jsonl` and
   (columns matched by value, extra predicted columns allowed)
 - **Strict-EX**: the same without extra columns
 - **Exec-Rate**: predictions that parsed and executed without error
+
+### Auto MDL
+
+```bash
+cargo run --release -p mqlc -- profile
+cargo run --release -p mqlc -- --arm auto-mdl bench --out runs/auto-mdl-dev --split dev
+```
+
+`mqlc profile` reads up to the first 100,000 documents of every collection
+in `_id` order (`--sample-size`), so the same data always gives the same
+profile, and writes one
+[Wren MDL](https://github.com/Canner/wren-engine) project per database to
+`mdl/auto/<db_id>/` (`--mdl-dir`, gitignored): `mdl.json` with one model per
+collection and one column per field path, and `instructions.json`. Field
+types, presence, arrays, embedded documents and the array a field sits in are
+column properties in the `mqlc.` namespace (ADR 0004), so `mdl.json` stays
+valid Wren MDL. `--split` and `--db` choose the databases; all 21 take about
+35 s, and rerunning overwrites them. On AptMQL-Bench, 100,000 documents find
+every field a full scan finds.
+
+`--arm auto-mdl` (for `ask` and `bench`) puts the auto MDL in the prompt in
+place of the official schema description, in the same layout (`Collection:
+<name>`, then one JSON line per field), followed by the instructions. The
+run's records carry the arm, and the manifest records a hash of each
+database's rendered MDL: a rerun may add databases (a smoke run grown into a
+full split) but is refused once a database's MDL has changed. A database with no MDL
+project stops the run unrecorded.
 
 ### IR coverage
 
