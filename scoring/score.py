@@ -11,8 +11,8 @@ the results with the official `compare_fuzzy`:
 Records skipped for a context overflow (the prompt was never sent) are neither
 right nor wrong: they are left out of all three shares and counted apart.
 
-Writes `scores.jsonl` (one line per record) and `summary.json` into the run
-directory, and prints the summary.
+Writes `scores.jsonl` (one line per record) and `summary.json` (overall, by
+split and by database) into the run directory, and prints the summary.
 
     uv run --project scoring scoring/score.py runs/<name>
 """
@@ -110,10 +110,12 @@ def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
     with (run_dir / "scores.jsonl").open("w") as f:
         for s in scores:
             f.write(json.dumps(s) + "\n")
-    by_db = defaultdict(list)
+    by_split, by_db = defaultdict(list), defaultdict(list)
     for s in scores:
+        by_split[samples[s["sample_id"]]["split"]].append(s)
         by_db[s["db_id"]].append(s)
     summary = percentages(scores) | {
+        "by_split": {split: percentages(rows) for split, rows in sorted(by_split.items())},
         "by_db": {db: percentages(rows) for db, rows in sorted(by_db.items())},
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -129,7 +131,9 @@ def main() -> None:
 
     summary = score_run(args.run_dir, args.data_dir, args.mongo_uri)
     print(f"{'database':<26}{'n':>5}{'skipped':>9}{'Exec-Rate':>11}{'Soft-EX':>9}{'Strict-EX':>11}")
-    rows = list(summary["by_db"].items()) + [("all", summary)]
+    rows = (list(summary["by_db"].items())
+            + [(f"[{split}]", s) for split, s in summary["by_split"].items()]
+            + [("all", summary)])
     for db, s in rows:
         print(f"{db:<26}{s['samples']:>5}{s[SKIPPED]:>9}{s['exec_rate']:>10.2f}%"
               f"{s['soft_ex']:>8.2f}%{s['strict_ex']:>10.2f}%")

@@ -73,6 +73,50 @@ async fn sends_the_official_prompt_with_schema_and_question_but_no_evidence() {
 }
 
 #[tokio::test]
+async fn the_prompt_keys_arm_rewrites_each_field_to_the_keys_the_official_prompt_names() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::OfficialPromptKeys);
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    assert_eq!(
+        engine.llm().requests()[0].context,
+        "<MongoDB Schema Description>\n\n\
+         Collection: animals\n\
+         {\"field_name\": \"name\", \"field_description\": \"Pet name\", \"data_format\": \"String\", \"value_description\": \"\"}\n\
+         {\"field_name\": \"species\", \"field_description\": \"Kind of animal\", \"data_format\": \"String\", \"value_description\": \"cat, dog\"}\
+         \n\n</MongoDB Schema Description>"
+    );
+}
+
+#[tokio::test]
+async fn sends_the_temperature_it_was_given() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_temperature(1.0);
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    assert_eq!(engine.llm().requests()[0].temperature, 1.0);
+    assert_eq!(engine.settings().temperature, 1.0);
+}
+
+#[tokio::test]
 async fn accepts_python_literals_and_extended_json_dates() {
     let data = dataset_dir();
     let mongo = mongo_with(vec![

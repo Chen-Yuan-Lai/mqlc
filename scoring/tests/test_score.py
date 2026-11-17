@@ -20,7 +20,7 @@ REPO_EVAL_SCRIPT = Path(__file__).parents[2] / "data/AptMQL-Bench/eval_script.py
 
 def gold(sample_id, pipeline):
     return {
-        "split": "dev", "db_id": "pets", "question": "?", "evidence": "",
+        "split": sample_id.split("_")[0], "db_id": "pets", "question": "?", "evidence": "",
         "mongodb_evidence": "", "question_id": 1, "sample_id": sample_id, "SQL": "",
         "MQL": {"collection": "animals", "aggregation_pipeline": pipeline},
     }
@@ -62,6 +62,7 @@ def data_dir(tmp_path):
         gold("dev_2", names),
         gold("dev_3", names),
         gold("dev_4", names),
+        gold("train_1", names),
     ]
     (data / "aptmqlbench_data.jsonl").write_text("".join(json.dumps(s) + "\n" for s in samples))
     return data
@@ -84,21 +85,30 @@ def test_scores_a_run_with_official_soft_ex_strict_ex_and_exec_rate(
         record("dev_3", error={"kind": "parse", "message": "no pipeline"}),
         # Never sent, so neither right nor wrong: left out of every share.
         record("dev_4", error={"kind": "skipped_context_overflow", "message": "too long"}),
+        record("train_1", [{"$match": {"species": "cat"}}, {"$project": {"_id": 0, "name": 1}}]),
     ]
     (run / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
 
     summary = score.score_run(run, data_dir, mongo_uri)
 
-    assert summary["samples"] == 3
+    assert summary["samples"] == 4
     assert summary["skipped_context_overflow"] == 1
-    assert summary["exec_rate"] == pytest.approx(200 / 3)
-    assert summary["soft_ex"] == pytest.approx(200 / 3)
-    assert summary["strict_ex"] == pytest.approx(100 / 3)
+    assert summary["exec_rate"] == pytest.approx(75)
+    assert summary["soft_ex"] == pytest.approx(75)
+    assert summary["strict_ex"] == pytest.approx(50)
+    # The dev split is the reported score (ADR 0006), so it stands apart.
+    dev, train = summary["by_split"]["dev"], summary["by_split"]["train"]
+    assert (dev["samples"], dev["skipped_context_overflow"]) == (3, 1)
+    assert dev["exec_rate"] == pytest.approx(200 / 3)
+    assert dev["soft_ex"] == pytest.approx(200 / 3)
+    assert dev["strict_ex"] == pytest.approx(100 / 3)
+    assert (train["samples"], train["soft_ex"], train["strict_ex"]) == (1, 100, 100)
     per_sample = [json.loads(l) for l in (run / "scores.jsonl").read_text().splitlines()]
     assert [(s["sample_id"], s["soft_ex"], s["strict_ex"], s["skipped"]) for s in per_sample] == [
         ("dev_1", True, True, False),
         ("dev_2", True, False, False),
         ("dev_3", False, False, False),
         ("dev_4", False, False, True),
+        ("train_1", True, True, False),
     ]
     assert json.loads((run / "summary.json").read_text()) == summary

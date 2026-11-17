@@ -1,0 +1,88 @@
+{
+  "samples": 1762,
+  "skipped_context_overflow": 0,
+  "exec_rate": 96.87854710556186,
+  "soft_ex": 39.330306469920544,
+  "strict_ex": 17.366628830874006,
+  "by_split": {
+    "train": {
+      "samples": 1762,
+      "skipped_context_overflow": 0,
+      "exec_rate": 96.87854710556186,
+      "soft_ex": 39.330306469920544,
+      "strict_ex": 17.366628830874006
+    }
+  },
+  "by_db": {
+    "beer_factory": {
+      "samples": 124,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 42.74193548387097,
+      "strict_ex": 20.967741935483872
+    },
+    "cs_semester": {
+      "samples": 106,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.05660377358491,
+      "soft_ex": 47.16981132075472,
+      "strict_ex": 23.58490566037736
+    },
+    "food_inspection_2": {
+      "samples": 131,
+      "skipped_context_overflow": 0,
+      "exec_rate": 94.65648854961832,
+      "soft_ex": 39.69465648854962,
+      "strict_ex": 24.427480916030536
+    },
+    "hockey": {
+      "samples": 155,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.35483870967742,
+      "soft_ex": 37.41935483870968,
+      "strict_ex": 12.903225806451612
+    },
+    "mondial_geo": {
+      "samples": 241,
+      "skipped_context_overflow": 0,
+      "exec_rate": 95.02074688796681,
+      "soft_ex": 54.356846473029044,
+      "strict_ex": 17.842323651452283
+    },
+    "professional_basketball": {
+      "samples": 143,
+      "skipped_context_overflow": 0,
+      "exec_rate": 96.5034965034965,
+      "soft_ex": 38.46153846153846,
+      "strict_ex": 15.384615384615385
+    },
+    "public_review_platform": {
+      "samples": 343,
+      "skipped_context_overflow": 0,
+      "exec_rate": 93.58600583090379,
+      "soft_ex": 30.02915451895044,
+      "strict_ex": 19.24198250728863
+    },
+    "restaurant": {
+      "samples": 83,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 15.662650602409638,
+      "strict_ex": 6.024096385542169
+    },
+    "shooting": {
+      "samples": 18,
+      "skipped_context_overflow": 0,
+      "exec_rate": 94.44444444444444,
+      "soft_ex": 38.888888888888886,
+      "strict_ex": 22.22222222222222
+    },
+    "works_cycles": {
+      "samples": 418,
+      "skipped_context_overflow": 0,
+      "exec_rate": 98.56459330143541,
+      "soft_ex": 40.90909090909091,
+      "strict_ex": 15.07177033492823
+    }
+  }
+}

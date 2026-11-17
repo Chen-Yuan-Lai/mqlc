@@ -28,6 +28,21 @@ pub enum DatasetError {
     BadPrompt(PathBuf),
     #[error("no schema description for {split}/{db_id}")]
     NoSchema { split: String, db_id: String },
+    #[error("{path} line {line}: {source}")]
+    BadDescription {
+        path: PathBuf,
+        line: usize,
+        source: serde_json::Error,
+    },
+}
+
+/// One line of a `collections_description/<collection>.jsonl` file.
+#[derive(Deserialize)]
+struct FieldDescription {
+    field_name: String,
+    field_description: String,
+    data_type: String,
+    value_description: String,
 }
 
 /// One benchmark question with its gold answer.
@@ -154,6 +169,57 @@ impl Dataset {
     /// `Collection: <name>` header. The paper does not publish how it joined the
     /// files, so this layout is our own.
     pub fn schema_description(&self, split: &str, db_id: &str) -> Result<String, DatasetError> {
+        self.joined_descriptions(split, db_id, |p| Ok(read(p)?.trim().to_string()))
+    }
+
+    /// The official schema description with each field line rewritten to the
+    /// keys the official prompt names (`field_name`, `field_description`,
+    /// `data_format`, `value_description`): the files call `data_format`
+    /// `data_type` and add `required`, which the prompt does not mention.
+    pub fn prompt_keys_schema_description(
+        &self,
+        split: &str,
+        db_id: &str,
+    ) -> Result<String, DatasetError> {
+        self.joined_descriptions(split, db_id, |path| {
+            read(path)?
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| !line.trim().is_empty())
+                .map(|(index, line)| {
+                    let field: FieldDescription =
+                        serde_json::from_str(line).map_err(|source| {
+                            DatasetError::BadDescription {
+                                path: path.to_path_buf(),
+                                line: index + 1,
+                                source,
+                            }
+                        })?;
+                    // Written by hand to keep the files' `", "` and `": "`
+                    // separators, which serde_json's compact output drops.
+                    let quoted = |v: &str| serde_json::to_string(v).expect("strings serialize");
+                    Ok(format!(
+                        "{{\"field_name\": {}, \"field_description\": {}, \"data_format\": {}, \"value_description\": {}}}",
+                        quoted(&field.field_name),
+                        quoted(&field.field_description),
+                        quoted(&field.data_type),
+                        quoted(&field.value_description),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|lines| lines.join("\n"))
+        })
+    }
+
+    /// Every `collections_description/<collection>.jsonl` of a database in
+    /// name order, each rendered by `render` under a `Collection: <name>`
+    /// header, one blank line apart.
+    fn joined_descriptions(
+        &self,
+        split: &str,
+        db_id: &str,
+        render: impl Fn(&Path) -> Result<String, DatasetError>,
+    ) -> Result<String, DatasetError> {
         let dir = self
             .root
             .join("databases")
@@ -177,7 +243,7 @@ impl Dataset {
             .iter()
             .map(|p| {
                 let name = p.file_stem().unwrap().to_string_lossy();
-                Ok(format!("Collection: {name}\n{}", read(p)?.trim()))
+                Ok(format!("Collection: {name}\n{}", render(p)?))
             })
             .collect::<Result<Vec<_>, DatasetError>>()?;
         Ok(parts.join("\n\n"))

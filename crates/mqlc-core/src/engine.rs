@@ -16,7 +16,8 @@ use crate::mdl::{MdlError, MdlProject};
 use crate::reply::{ParseError, parse_reply};
 
 const MAX_TOKENS: u32 = 4096;
-const TEMPERATURE: f32 = 0.0;
+/// The temperature of every run unless `Engine::with_temperature` says otherwise.
+pub const DEFAULT_TEMPERATURE: f32 = 0.0;
 const WRITE_STAGES: [&str; 2] = ["$out", "$merge"];
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -101,6 +102,10 @@ pub struct Settings {
 pub enum Arm {
     /// The official schema description, the paper's baseline.
     Official,
+    /// The official schema description with each field rewritten to the keys
+    /// the official prompt names (`data_type` as `data_format`, no
+    /// `required`): a guess at how the paper sent it (#5).
+    OfficialPromptKeys,
     /// The auto MDL that `mqlc profile` wrote to `dir/<db_id>/`, in place of
     /// the official description.
     AutoMdl { dir: PathBuf },
@@ -111,6 +116,7 @@ impl Arm {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Official => "official",
+            Self::OfficialPromptKeys => "official-prompt-keys",
             Self::AutoMdl { .. } => "auto-mdl",
         }
     }
@@ -121,6 +127,7 @@ pub struct Engine<L> {
     mongo: Client,
     dataset: Dataset,
     arm: Arm,
+    temperature: f32,
     /// Rendered MDL per database, loaded once so every prompt of a run
     /// matches the hash in its manifest.
     mdl: Mutex<HashMap<String, String>>,
@@ -133,12 +140,18 @@ impl<L: LlmClient> Engine<L> {
             mongo,
             dataset,
             arm: Arm::Official,
+            temperature: DEFAULT_TEMPERATURE,
             mdl: Mutex::default(),
         }
     }
 
     pub fn with_arm(mut self, arm: Arm) -> Self {
         self.arm = arm;
+        self
+    }
+
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = temperature;
         self
     }
 
@@ -156,7 +169,7 @@ impl<L: LlmClient> Engine<L> {
 
     pub fn settings(&self) -> Settings {
         Settings {
-            temperature: TEMPERATURE,
+            temperature: self.temperature,
             max_tokens: MAX_TOKENS,
             thinking: false,
             knowledge_mode: "full".to_string(),
@@ -165,7 +178,7 @@ impl<L: LlmClient> Engine<L> {
     }
 
     /// Answers one question with the official prompt and the arm's knowledge
-    /// (no evidence), at temperature 0.
+    /// (no evidence), at temperature 0 unless `with_temperature` says otherwise.
     pub async fn ask(&self, sample: &Sample) -> Result<Answer, AskError> {
         let request = self.request(sample)?;
         if let Some(skipped) = self.overflow_answer(&request) {
@@ -200,14 +213,15 @@ impl<L: LlmClient> Engine<L> {
 
     /// A hash per database of the knowledge the arm sends for it, recorded in
     /// run manifests so a run does not resume on different knowledge. Empty
-    /// for the official description, which the dataset revision fixes.
+    /// for the official description (either layout), which the dataset
+    /// revision fixes.
     pub fn knowledge_hashes<'a>(
         &self,
         db_ids: impl IntoIterator<Item = &'a str>,
     ) -> Result<BTreeMap<String, String>, MdlError> {
-        if self.arm == Arm::Official {
+        let Arm::AutoMdl { .. } = self.arm else {
             return Ok(BTreeMap::new());
-        }
+        };
         db_ids
             .into_iter()
             .map(|db_id| Ok((db_id.to_string(), sha256(self.mdl(db_id)?.as_bytes()))))
@@ -235,6 +249,9 @@ impl<L: LlmClient> Engine<L> {
             Arm::Official => self
                 .dataset
                 .schema_description(&sample.split, &sample.db_id)?,
+            Arm::OfficialPromptKeys => self
+                .dataset
+                .prompt_keys_schema_description(&sample.split, &sample.db_id)?,
             Arm::AutoMdl { .. } => self.mdl(&sample.db_id)?,
         };
         Ok(LlmRequest {
@@ -242,7 +259,7 @@ impl<L: LlmClient> Engine<L> {
             context: prompt.schema_block(&schema),
             user: prompt.question_block(&sample.question, None),
             max_tokens: MAX_TOKENS,
-            temperature: TEMPERATURE,
+            temperature: self.temperature,
         })
     }
 

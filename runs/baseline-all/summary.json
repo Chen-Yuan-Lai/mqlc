@@ -1,0 +1,172 @@
+{
+  "samples": 3186,
+  "skipped_context_overflow": 0,
+  "exec_rate": 97.33207784055242,
+  "soft_ex": 41.933458882611426,
+  "strict_ex": 18.236032642812305,
+  "by_split": {
+    "dev": {
+      "samples": 1424,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.75280898876404,
+      "soft_ex": 44.80337078651685,
+      "strict_ex": 18.679775280898877
+    },
+    "train": {
+      "samples": 1762,
+      "skipped_context_overflow": 0,
+      "exec_rate": 96.99205448354142,
+      "soft_ex": 39.61407491486947,
+      "strict_ex": 17.877412031782065
+    }
+  },
+  "by_db": {
+    "beer_factory": {
+      "samples": 124,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 42.74193548387097,
+      "strict_ex": 25.0
+    },
+    "california_schools": {
+      "samples": 83,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.59036144578313,
+      "soft_ex": 46.98795180722892,
+      "strict_ex": 18.072289156626507
+    },
+    "card_games": {
+      "samples": 152,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.36842105263158,
+      "soft_ex": 30.263157894736842,
+      "strict_ex": 13.157894736842104
+    },
+    "codebase_community": {
+      "samples": 175,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.42857142857143,
+      "soft_ex": 62.857142857142854,
+      "strict_ex": 31.428571428571427
+    },
+    "cs_semester": {
+      "samples": 106,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 47.16981132075472,
+      "strict_ex": 26.41509433962264
+    },
+    "debit_card_specializing": {
+      "samples": 63,
+      "skipped_context_overflow": 0,
+      "exec_rate": 95.23809523809524,
+      "soft_ex": 15.873015873015873,
+      "strict_ex": 11.11111111111111
+    },
+    "european_football_2": {
+      "samples": 121,
+      "skipped_context_overflow": 0,
+      "exec_rate": 96.69421487603306,
+      "soft_ex": 42.14876033057851,
+      "strict_ex": 11.570247933884298
+    },
+    "financial": {
+      "samples": 105,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.14285714285714,
+      "soft_ex": 55.23809523809524,
+      "strict_ex": 30.476190476190474
+    },
+    "food_inspection_2": {
+      "samples": 131,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.70992366412214,
+      "soft_ex": 43.51145038167939,
+      "strict_ex": 25.19083969465649
+    },
+    "formula_1": {
+      "samples": 163,
+      "skipped_context_overflow": 0,
+      "exec_rate": 98.77300613496932,
+      "soft_ex": 41.104294478527606,
+      "strict_ex": 14.723926380368098
+    },
+    "hockey": {
+      "samples": 155,
+      "skipped_context_overflow": 0,
+      "exec_rate": 98.70967741935483,
+      "soft_ex": 34.83870967741935,
+      "strict_ex": 12.903225806451612
+    },
+    "mondial_geo": {
+      "samples": 241,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.5103734439834,
+      "soft_ex": 53.52697095435685,
+      "strict_ex": 17.842323651452283
+    },
+    "professional_basketball": {
+      "samples": 143,
+      "skipped_context_overflow": 0,
+      "exec_rate": 96.5034965034965,
+      "soft_ex": 38.46153846153846,
+      "strict_ex": 16.083916083916083
+    },
+    "public_review_platform": {
+      "samples": 343,
+      "skipped_context_overflow": 0,
+      "exec_rate": 92.4198250728863,
+      "soft_ex": 30.903790087463555,
+      "strict_ex": 18.950437317784257
+    },
+    "restaurant": {
+      "samples": 83,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 15.662650602409638,
+      "strict_ex": 6.024096385542169
+    },
+    "shooting": {
+      "samples": 18,
+      "skipped_context_overflow": 0,
+      "exec_rate": 94.44444444444444,
+      "soft_ex": 38.888888888888886,
+      "strict_ex": 22.22222222222222
+    },
+    "student_club": {
+      "samples": 153,
+      "skipped_context_overflow": 0,
+      "exec_rate": 98.69281045751634,
+      "soft_ex": 51.63398692810458,
+      "strict_ex": 19.607843137254903
+    },
+    "superhero": {
+      "samples": 121,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.52066115702479,
+      "soft_ex": 56.19834710743802,
+      "strict_ex": 19.834710743801654
+    },
+    "thrombosis_prediction": {
+      "samples": 148,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.97297297297297,
+      "soft_ex": 28.37837837837838,
+      "strict_ex": 12.162162162162161
+    },
+    "toxicology": {
+      "samples": 140,
+      "skipped_context_overflow": 0,
+      "exec_rate": 96.42857142857143,
+      "soft_ex": 48.57142857142857,
+      "strict_ex": 19.285714285714285
+    },
+    "works_cycles": {
+      "samples": 418,
+      "skipped_context_overflow": 0,
+      "exec_rate": 97.60765550239235,
+      "soft_ex": 41.6267942583732,
+      "strict_ex": 15.07177033492823
+    }
+  }
+}

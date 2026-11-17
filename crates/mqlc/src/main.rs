@@ -63,10 +63,16 @@ struct Cli {
     #[arg(long, env = "MQLC_CONTEXT_WINDOW", global = true)]
     context_window: Option<u32>,
 
-    /// Knowledge in the prompt: the official schema description, or the auto
-    /// MDL that `mqlc profile` wrote to --mdl-dir in its place.
+    /// Knowledge in the prompt: the official schema description, the same
+    /// with each field rewritten to the keys the official prompt names
+    /// (`official-prompt-keys`), or the auto MDL that `mqlc profile` wrote to
+    /// --mdl-dir in its place.
     #[arg(long, value_enum, default_value_t = ArmArg::Official, global = true)]
     arm: ArmArg,
+
+    /// Sampling temperature, recorded in the run manifest.
+    #[arg(long, default_value_t = engine::DEFAULT_TEMPERATURE, global = true)]
+    temperature: f32,
 
     /// Auto MDL projects, one directory per database (`mqlc profile --out`).
     #[arg(long, env = "MQLC_MDL_DIR", default_value = "mdl/auto", global = true)]
@@ -79,6 +85,7 @@ struct Cli {
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum ArmArg {
     Official,
+    OfficialPromptKeys,
     AutoMdl,
 }
 
@@ -243,6 +250,7 @@ async fn main() -> Result<()> {
     }
     let arm = match cli.arm {
         ArmArg::Official => Arm::Official,
+        ArmArg::OfficialPromptKeys => Arm::OfficialPromptKeys,
         ArmArg::AutoMdl => Arm::AutoMdl {
             dir: cli.mdl_dir.clone(),
         },
@@ -252,7 +260,13 @@ async fn main() -> Result<()> {
             let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
             let model = cli.model.unwrap_or_else(|| "claude-haiku-4-5".to_string());
             let llm = AnthropicClient::new(key, model);
-            run(cli.command, Engine::new(llm, mongo, dataset).with_arm(arm)).await
+            run(
+                cli.command,
+                Engine::new(llm, mongo, dataset)
+                    .with_arm(arm)
+                    .with_temperature(cli.temperature),
+            )
+            .await
         }
         BackendArg::Openai => {
             let window = cli
@@ -263,7 +277,13 @@ async fn main() -> Result<()> {
                 .context("--model is required with --backend openai")?;
             let key = std::env::var("OPENAI_API_KEY").ok();
             let llm = OpenAiClient::new(cli.base_url, key, model, window);
-            run(cli.command, Engine::new(llm, mongo, dataset).with_arm(arm)).await
+            run(
+                cli.command,
+                Engine::new(llm, mongo, dataset)
+                    .with_arm(arm)
+                    .with_temperature(cli.temperature),
+            )
+            .await
         }
     }
 }

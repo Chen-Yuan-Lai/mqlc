@@ -9,6 +9,40 @@ Workspace:
 - `mqlc`: CLI
 - `mqlc-mcp`: MCP server (not implemented yet)
 
+## Scores
+
+Claude Haiku 4.5, the official prompt and schema description, temperature 0,
+no thinking, no evidence. Dev is the reported score (ADR 0006); all 3,186
+compares with the paper.
+
+| Run | Split | n | Exec-Rate | Soft-EX | Strict-EX | Cost (USD) |
+|---|---|--:|--:|--:|--:|--:|
+| Paper (Haiku 4.5, no knowledge) | all | 3,186 | 98.34 | 47.71 | 23.79 | |
+| [baseline](runs/baseline-all/manifest.json) | **dev** | 1,424 | 97.75 | **44.80** | 18.68 | |
+| [baseline](runs/baseline-all/manifest.json) | train | 1,762 | 96.99 | 39.61 | 17.88 | |
+| [baseline](runs/baseline-all/manifest.json) | all | 3,186 | 97.33 | 41.93 | 18.24 | 4.08 (batch) |
+
+Per-database scores are in each run's [`summary.json`](runs/baseline-all/summary.json).
+
+The baseline is 5.8 points of Soft-EX under the paper, beyond the ±3 we
+aimed for, and we could not find why (#5). Strict-EX is as far under (5.5)
+and Exec-Rate 1 point, so the model answers fewer questions right rather
+than the scorer counting differently: the scorer gives the gold pipelines
+[99.47%](runs/gold-as-pred/summary.json) Soft-EX against themselves, 5
+replies fail to parse and 4 queries time out. The paper does not give its sampling settings or how it
+joined the schema files; two train runs rule out both as the cause (paired
+difference from the baseline's train half, 95% interval):
+
+| Run | Split | Soft-EX | vs baseline | Cost (USD) |
+|---|---|--:|--:|--:|
+| [`--arm official-prompt-keys`](runs/prompt-keys-train/manifest.json) | train | 39.33 | −0.28 ± 1.19 | 2.55 |
+| [`--temperature 1`](runs/temp1-train/manifest.json) | train | 38.31 | −1.31 ± 1.06 | 2.71 |
+
+Later experiments compare with this baseline, not the paper. The baseline ran
+at f8e38ab (its manifest says `-dirty` for an edit outside the code); the two
+train runs need the options added by the commit that adds this table. The
+whole reproduction cost USD 9.34.
+
 ## Setup
 
 Requirements: Rust (stable), Docker Engine with the compose plugin, and
@@ -67,9 +101,16 @@ are refused before they reach the database.
 | `--data-dir` | `MQLC_DATA_DIR` | `data/AptMQL-Bench` |
 | `--mongo-uri` | `MQLC_MONGO_URI` | `mongodb://mqlc:mqlc@localhost:27017/?authSource=admin` |
 | `--model` | `MQLC_MODEL` | `claude-haiku-4-5` |
-| `--arm` | | `official` (or `auto-mdl`, see [Auto MDL](#auto-mdl)) |
+| `--arm` | | `official` (or `official-prompt-keys`, below; `auto-mdl`, see [Auto MDL](#auto-mdl)) |
+| `--temperature` | | `0` |
 | `--mdl-dir` | `MQLC_MDL_DIR` | `mdl/auto` |
 | `--max-rows` | | `20` |
+
+`--arm official-prompt-keys` sends the same official description with each
+field line rewritten to the keys the official prompt names (`field_name`,
+`field_description`, `data_format`, `value_description`): the dataset's files
+call `data_format` `data_type` and add `required`. It is a guess at how the
+paper sent the description (#5).
 
 ### Other backends
 
@@ -146,6 +187,9 @@ results with the official `eval_script.py`, writing `scores.jsonl` and
   (columns matched by value, extra predicted columns allowed)
 - **Strict-EX**: the same without extra columns
 - **Exec-Rate**: predictions that parsed and executed without error
+
+`summary.json` has the three shares overall, per split (`by_split`; dev is
+the reported score, ADR 0006) and per database (`by_db`).
 
 ### Auto MDL
 

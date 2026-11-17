@@ -1,0 +1,23 @@
+{
+  "config": {
+    "arm": "official-prompt-keys",
+    "model": "claude-haiku-4-5",
+    "backend": "anthropic",
+    "context_window": 200000,
+    "temperature": 0.0,
+    "max_tokens": 4096,
+    "thinking": false,
+    "knowledge_mode": "full",
+    "ir": false,
+    "prompt_hash": "sha256:1754028c41f5674d30dccd6f4240678d779d8b04ae8bb05f4d81a41aed55f44a"
+  },
+  "invocations": [
+    {
+      "started_at": "2026-11-17T03:05:03.076Z",
+      "mqlc_version": "0.1.0+f8e38ab10fbe-dirty",
+      "endpoint": "https://api.anthropic.com",
+      "mode": "batch",
+      "samples": 1762
+    }
+  ]
+}

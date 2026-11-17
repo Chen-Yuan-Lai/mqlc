@@ -1,6 +1,14 @@
 /target
 /data
-/runs
+/runs/*
+# Runs the README reports: their manifest and summary, not their records.
+!/runs/baseline-all/
+!/runs/prompt-keys-train/
+!/runs/temp1-train/
+!/runs/gold-as-pred/
+/runs/*/*
+!/runs/*/manifest.json
+!/runs/*/summary.json
 .venv/
 __pycache__/
 .env

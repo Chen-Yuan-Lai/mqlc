@@ -1,0 +1,172 @@
+{
+  "samples": 3186,
+  "skipped_context_overflow": 0,
+  "exec_rate": 99.81167608286252,
+  "soft_ex": 99.46641556811048,
+  "strict_ex": 99.46641556811048,
+  "by_split": {
+    "dev": {
+      "samples": 1424,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.85955056179775,
+      "soft_ex": 99.57865168539325,
+      "strict_ex": 99.57865168539325
+    },
+    "train": {
+      "samples": 1762,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.77298524404087,
+      "soft_ex": 99.37570942111238,
+      "strict_ex": 99.37570942111238
+    }
+  },
+  "by_db": {
+    "beer_factory": {
+      "samples": 124,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "california_schools": {
+      "samples": 83,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "card_games": {
+      "samples": 152,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 99.34210526315789,
+      "strict_ex": 99.34210526315789
+    },
+    "codebase_community": {
+      "samples": 175,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "cs_semester": {
+      "samples": 106,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "debit_card_specializing": {
+      "samples": 63,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "european_football_2": {
+      "samples": 121,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "financial": {
+      "samples": 105,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.04761904761905,
+      "soft_ex": 99.04761904761905,
+      "strict_ex": 99.04761904761905
+    },
+    "food_inspection_2": {
+      "samples": 131,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 98.47328244274809,
+      "strict_ex": 98.47328244274809
+    },
+    "formula_1": {
+      "samples": 163,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 99.38650306748467,
+      "strict_ex": 99.38650306748467
+    },
+    "hockey": {
+      "samples": 155,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 99.35483870967742,
+      "strict_ex": 99.35483870967742
+    },
+    "mondial_geo": {
+      "samples": 241,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 99.5850622406639,
+      "strict_ex": 99.5850622406639
+    },
+    "professional_basketball": {
+      "samples": 143,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "public_review_platform": {
+      "samples": 343,
+      "skipped_context_overflow": 0,
+      "exec_rate": 98.83381924198251,
+      "soft_ex": 97.95918367346938,
+      "strict_ex": 97.95918367346938
+    },
+    "restaurant": {
+      "samples": 83,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "shooting": {
+      "samples": 18,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "student_club": {
+      "samples": 153,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 99.34640522875817,
+      "strict_ex": 99.34640522875817
+    },
+    "superhero": {
+      "samples": 121,
+      "skipped_context_overflow": 0,
+      "exec_rate": 99.17355371900827,
+      "soft_ex": 99.17355371900827,
+      "strict_ex": 99.17355371900827
+    },
+    "thrombosis_prediction": {
+      "samples": 148,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    },
+    "toxicology": {
+      "samples": 140,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 99.28571428571429,
+      "strict_ex": 99.28571428571429
+    },
+    "works_cycles": {
+      "samples": 418,
+      "skipped_context_overflow": 0,
+      "exec_rate": 100.0,
+      "soft_ex": 100.0,
+      "strict_ex": 100.0
+    }
+  }
+}
