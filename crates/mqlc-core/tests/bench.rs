@@ -811,3 +811,112 @@ async fn an_auto_mdl_run_resumes_over_more_databases_than_it_started_with() {
     let hashes = manifest["config"]["knowledge"].as_object().unwrap();
     assert_eq!(hashes.keys().collect::<Vec<_>>(), [DB_ID, "zoo"]);
 }
+
+#[tokio::test]
+async fn a_run_records_which_knowledge_each_arm_sent() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let dir = knowledge.path().to_path_buf();
+
+    for (arm, name, mdl_dir) in [
+        (Arm::Official, "official", None),
+        (Arm::OfficialEvidence, "official-evidence", None),
+        (Arm::AutoMdl { dir: dir.clone() }, "auto-mdl", Some(&dir)),
+        (
+            Arm::OfficialAutoMdl { dir: dir.clone() },
+            "official-auto-mdl",
+            Some(&dir),
+        ),
+    ] {
+        let engine = Engine::new(
+            ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+        .with_arm(arm);
+        let run_dir = tempfile::tempdir().unwrap();
+        let samples = engine.dataset().samples()[..1].to_vec();
+
+        bench::run(
+            &engine,
+            run_dir.path(),
+            &samples,
+            &Options::default(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(run_dir.path().join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["config"]["arm"], name);
+        assert_eq!(records(run_dir.path())[0].arm, name);
+        let invocation = &manifest["invocations"][0];
+        match mdl_dir {
+            Some(dir) => {
+                assert_eq!(invocation["knowledge_dir"], dir.display().to_string());
+                assert!(
+                    manifest["config"]["knowledge"][DB_ID]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("sha256:"),
+                    "{name}"
+                );
+            }
+            None => {
+                assert!(invocation.get("knowledge_dir").is_none(), "{name}");
+                assert!(manifest["config"].get("knowledge").is_none(), "{name}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_human_mdl_run_over_a_dev_database_stops_before_asking_anything() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::HumanMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+    let run_dir = tempfile::tempdir().unwrap();
+    let samples = engine.dataset().samples().to_vec();
+
+    let err = bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            bench::BenchError::Knowledge(mqlc_core::AskError::Leakage { .. })
+        ),
+        "{err}"
+    );
+    assert!(engine.llm().requests().is_empty());
+    assert!(!run_dir.path().join("results.jsonl").exists());
+}

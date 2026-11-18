@@ -1,7 +1,7 @@
 //! The single-question API: question → prompt → LLM → pipeline → rows.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,12 @@ pub enum AskError {
     /// missing dataset file.
     #[error("cannot load knowledge: {0}")]
     Knowledge(#[from] MdlError),
+    /// A human MDL of a database outside the train split: human knowledge
+    /// may only be written on train (ADR 0006).
+    #[error(
+        "refusing the human MDL of {db_id} ({split}): human knowledge may only be written for train databases"
+    )]
+    Leakage { db_id: String, split: String },
     #[error("LLM call failed: {0}")]
     Llm(#[from] LlmError),
     #[error("database unavailable: {0}")]
@@ -122,9 +128,33 @@ pub enum Arm {
     /// The auto MDL that `mqlc profile` wrote to `dir/<db_id>/`, in place of
     /// the official description.
     AutoMdl { dir: PathBuf },
+    /// The official schema description with that auto MDL merged into it
+    /// field by field (`MdlProject::render_with_official`).
+    OfficialAutoMdl { dir: PathBuf },
+    /// A human MDL (an auto MDL a person added descriptions, formulas and
+    /// instructions to) in `dir/<db_id>/`, in place of the official
+    /// description. Train databases only.
+    HumanMdl { dir: PathBuf },
+    /// The official schema description with that human MDL merged into it.
+    OfficialHumanMdl { dir: PathBuf },
+    /// The official schema description with the sample's `mongodb_evidence`,
+    /// the paper's "external knowledge": the upper bound of experiment A. A
+    /// sample without evidence gets the official prompt unchanged.
+    OfficialEvidence,
 }
 
 impl Arm {
+    /// The directory of the arm's MDL projects, if it uses any.
+    pub fn mdl_dir(&self) -> Option<&Path> {
+        match self {
+            Self::AutoMdl { dir }
+            | Self::OfficialAutoMdl { dir }
+            | Self::HumanMdl { dir }
+            | Self::OfficialHumanMdl { dir } => Some(dir),
+            _ => None,
+        }
+    }
+
     /// The arm's name in records and manifests.
     pub fn name(&self) -> &'static str {
         match self {
@@ -132,6 +162,10 @@ impl Arm {
             Self::OfficialPromptKeys => "official-prompt-keys",
             Self::OfficialTagged => "official-tagged",
             Self::AutoMdl { .. } => "auto-mdl",
+            Self::OfficialAutoMdl { .. } => "official-auto-mdl",
+            Self::HumanMdl { .. } => "human-mdl",
+            Self::OfficialHumanMdl { .. } => "official-human-mdl",
+            Self::OfficialEvidence => "official-evidence",
         }
     }
 }
@@ -215,8 +249,8 @@ impl<L: LlmClient> Engine<L> {
         }
     }
 
-    /// Answers one question with the official prompt and the arm's knowledge
-    /// (no evidence), at temperature 0 unless `with_temperature` says otherwise.
+    /// Answers one question with the official prompt and the arm's knowledge,
+    /// at temperature 0 unless `with_temperature` says otherwise.
     pub async fn ask(&self, sample: &Sample) -> Result<Answer, AskError> {
         let request = self.request(sample)?;
         if let Some(skipped) = self.overflow_answer(&request) {
@@ -256,26 +290,41 @@ impl<L: LlmClient> Engine<L> {
     pub fn knowledge_hashes<'a>(
         &self,
         db_ids: impl IntoIterator<Item = &'a str>,
-    ) -> Result<BTreeMap<String, String>, MdlError> {
-        let Arm::AutoMdl { .. } = self.arm else {
+    ) -> Result<BTreeMap<String, String>, AskError> {
+        if self.arm.mdl_dir().is_none() {
             return Ok(BTreeMap::new());
-        };
+        }
         db_ids
             .into_iter()
             .map(|db_id| Ok((db_id.to_string(), sha256(self.mdl(db_id)?.as_bytes()))))
             .collect()
     }
 
-    /// The auto MDL of `db_id`, rendered for the prompt.
-    fn mdl(&self, db_id: &str) -> Result<String, MdlError> {
-        let Arm::AutoMdl { dir } = &self.arm else {
-            unreachable!("only the auto-mdl arm has an MDL")
-        };
+    /// The MDL of `db_id`, rendered for the prompt as the arm sends it.
+    fn mdl(&self, db_id: &str) -> Result<String, AskError> {
+        let dir = self.arm.mdl_dir().expect("only an MDL arm renders an MDL");
         let mut cache = self.mdl.lock().unwrap();
         if let Some(text) = cache.get(db_id) {
             return Ok(text.clone());
         }
-        let text = MdlProject::load(&dir.join(db_id))?.render();
+        let split = self.dataset.split_of(db_id).unwrap_or_default();
+        if matches!(
+            self.arm,
+            Arm::HumanMdl { .. } | Arm::OfficialHumanMdl { .. }
+        ) && split != "train"
+        {
+            return Err(AskError::Leakage {
+                db_id: db_id.to_string(),
+                split: split.to_string(),
+            });
+        }
+        let project = MdlProject::load(&dir.join(db_id))?;
+        let text = match &self.arm {
+            Arm::OfficialAutoMdl { .. } | Arm::OfficialHumanMdl { .. } => {
+                project.render_with_official(&self.dataset.official_fields(split, db_id)?)
+            }
+            _ => project.render(),
+        };
         cache.insert(db_id.to_string(), text.clone());
         Ok(text)
     }
@@ -284,7 +333,7 @@ impl<L: LlmClient> Engine<L> {
     pub fn request(&self, sample: &Sample) -> Result<LlmRequest, AskError> {
         let prompt = self.dataset.prompt();
         let schema = match &self.arm {
-            Arm::Official => self
+            Arm::Official | Arm::OfficialEvidence => self
                 .dataset
                 .schema_description(&sample.split, &sample.db_id)?,
             Arm::OfficialPromptKeys => self
@@ -293,7 +342,17 @@ impl<L: LlmClient> Engine<L> {
             Arm::OfficialTagged => self
                 .dataset
                 .tagged_schema_description(&sample.split, &sample.db_id)?,
-            Arm::AutoMdl { .. } => self.mdl(&sample.db_id)?,
+            Arm::AutoMdl { .. }
+            | Arm::OfficialAutoMdl { .. }
+            | Arm::HumanMdl { .. }
+            | Arm::OfficialHumanMdl { .. } => self.mdl(&sample.db_id)?,
+        };
+        let evidence = match self.arm {
+            // Sent as written: 48 evidences start or end with whitespace.
+            Arm::OfficialEvidence => {
+                Some(sample.mongodb_evidence.as_str()).filter(|e| !e.trim().is_empty())
+            }
+            _ => None,
         };
         let (system, context) = if self.single_message {
             (
@@ -306,7 +365,7 @@ impl<L: LlmClient> Engine<L> {
         Ok(LlmRequest {
             system,
             context,
-            user: prompt.question_block(&sample.question, None),
+            user: prompt.question_block(&sample.question, evidence),
             max_tokens: self.max_tokens(),
             temperature: self.temperature,
             thinking_budget: self.thinking_budget,

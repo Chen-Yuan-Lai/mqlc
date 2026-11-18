@@ -1,5 +1,8 @@
 mod support;
 
+use std::fs;
+use std::path::Path;
+
 use mongodb::bson::{DateTime, doc};
 use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::testing::ScriptedLlm;
@@ -379,5 +382,270 @@ async fn a_database_with_no_auto_mdl_is_an_error_not_an_answer() {
     let err = engine.ask(&sample).await.unwrap_err();
 
     assert!(matches!(err, AskError::Knowledge(_)), "{err}");
+    assert!(engine.llm().requests().is_empty());
+}
+
+#[tokio::test]
+async fn the_evidence_arm_adds_the_samples_mongodb_evidence_to_the_official_prompt() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::OfficialEvidence);
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let request = &engine.llm().requests()[0];
+    assert!(
+        request
+            .context
+            .contains("Collection: animals\n{\"field_name\": \"name\"")
+    );
+    assert!(request.user.ends_with(
+        "</Natural Language Request>\n\n-----------------------------\n\n\
+         <Evidence>\ncats refers to species = 'cat'\n</Evidence>"
+    ));
+    assert_eq!(engine.arm().name(), "official-evidence");
+}
+
+#[tokio::test]
+async fn the_evidence_arm_sends_a_sample_without_evidence_the_official_prompt_unchanged() {
+    let data = dataset_dir();
+    let path = data.path().join("aptmqlbench_data.jsonl");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("cats refers to species = 'cat'", "")).unwrap();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let ask = |arm: Arm| {
+        let mongo = mongo.client.clone();
+        let data = data.path().to_path_buf();
+        async move {
+            let engine = Engine::new(
+                ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+                mongo,
+                Dataset::open(data).unwrap(),
+            )
+            .with_arm(arm);
+            let sample = engine.dataset().sample("dev_7").unwrap().clone();
+            engine.ask(&sample).await.unwrap();
+            engine.llm().requests()[0].clone()
+        }
+    };
+
+    let with_evidence_arm = ask(Arm::OfficialEvidence).await;
+    let official = ask(Arm::Official).await;
+
+    assert_eq!(with_evidence_arm, official);
+    assert!(!with_evidence_arm.user.contains("Evidence"));
+}
+
+#[tokio::test]
+async fn the_official_and_auto_mdl_arm_merges_the_auto_mdl_into_each_official_field_line() {
+    let data = dataset_dir();
+    let description = data
+        .path()
+        .join("databases/dev/pets/collections_description/animals.jsonl");
+    let official = fs::read_to_string(&description).unwrap();
+    let visits = r#"{"field_name": "visits", "field_description": "Vet visits", "data_type": "Array", "required": false, "value_description": ""}"#;
+    fs::write(&description, format!("{official}\n{visits}\n")).unwrap();
+    let mongo = mongo_with(vec![
+        doc! { "name": "Tom", "species": "cat", "visits": [{ "vet": "V1" }] },
+        doc! { "name": "Rex", "species": "dog" },
+    ])
+    .await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::OfficialAutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let context = &engine.llm().requests()[0].context;
+    // Official fields first, in the official order, each with what the
+    // profile adds; then the fields only the profile saw.
+    let expected_start = concat!(
+        "<MongoDB Schema Description>\n\n",
+        "Collection: animals\n",
+        r#"{"field_name": "name", "field_description": "Pet name", "data_type": "String", "required": true, "value_description": "", "values": ["Tom","Rex"]}"#,
+        "\n",
+        r#"{"field_name": "species", "field_description": "Kind of animal", "data_type": "String", "required": true, "value_description": "cat, dog", "values": ["cat","dog"]}"#,
+        "\n",
+        r#"{"field_name": "visits", "field_description": "Vet visits", "data_type": "Array", "required": false, "value_description": "", "observed_type": "Array<Document>", "present": "50%"}"#,
+        "\n",
+        r#"{"field_name": "_id", "data_type": "ObjectId"}"#,
+        "\n",
+        r#"{"field_name": "visits.vet", "data_type": "String", "in_array": "visits", "values": ["V1"]}"#,
+        "\n\nInstructions:\n- field_name is",
+    );
+    assert!(context.starts_with(expected_start), "{context}");
+    assert!(
+        context.contains("\n- In a field with a field_description, data_type is the official"),
+        "{context}"
+    );
+    assert_eq!(context.matches("Collection: animals").count(), 1);
+    assert_eq!(engine.arm().name(), "official-auto-mdl");
+}
+
+/// Moves the fixture's database to the train split, where a human MDL may be
+/// written (ADR 0006); its samples become `train_7` and `train_8`.
+fn move_to_train(data: &Path) {
+    let path = data.join("aptmqlbench_data.jsonl");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace(r#""split": "dev""#, r#""split": "train""#)
+            .replace("dev_", "train_"),
+    )
+    .unwrap();
+    fs::create_dir_all(data.join("databases/train")).unwrap();
+    fs::rename(
+        data.join("databases/dev/pets"),
+        data.join("databases/train/pets"),
+    )
+    .unwrap();
+}
+
+/// Profiles the fixture database into `knowledge/<DB_ID>/` and applies
+/// `edit` to its `mdl.json` and `instructions.json`, as a person would.
+async fn profile_and_edit(
+    mongo: &support::Mongo,
+    knowledge: &Path,
+    edit: impl FnOnce(&mut serde_json::Value, &mut serde_json::Value),
+) {
+    let dir = knowledge.join(DB_ID);
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&dir)
+        .unwrap();
+    let read = |file: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(dir.join(file)).unwrap()).unwrap()
+    };
+    let (mut mdl, mut instructions) = (read("mdl.json"), read("instructions.json"));
+    edit(&mut mdl, &mut instructions);
+    fs::write(dir.join("mdl.json"), mdl.to_string()).unwrap();
+    fs::write(dir.join("instructions.json"), instructions.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn a_human_mdl_sends_its_descriptions_formulas_and_instructions() {
+    let data = dataset_dir();
+    move_to_train(data.path());
+    let mongo = mongo_with(vec![
+        doc! { "name": "Tom", "species": "cat", "born": 2019 },
+        doc! { "name": "Rex", "species": "dog", "born": 2021 },
+    ])
+    .await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile_and_edit(&mongo, knowledge.path(), |mdl, instructions| {
+        let animals = &mut mdl["models"][0];
+        animals["properties"]["description"] = "Pets registered at the clinic".into();
+        let columns = animals["columns"].as_array_mut().unwrap();
+        let species = columns.iter_mut().find(|c| c["name"] == "species").unwrap();
+        species["properties"]["description"] = "cat or dog, lower case".into();
+        columns.push(serde_json::json!({
+            "name": "age",
+            "type": "Int32",
+            "isCalculated": true,
+            "expression": r#"{"$subtract": [2024, "$born"]}"#,
+            "properties": { "description": "Age in years in 2024" },
+        }));
+        instructions
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "instruction": "A puppy is a dog under 1 year." }));
+    })
+    .await;
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::HumanMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("train_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let context = &engine.llm().requests()[0].context;
+    for expected in [
+        "Collection: animals\nDescription: Pets registered at the clinic\n{\"field_name\": \"_id\"",
+        r#"{"field_name": "species", "data_type": "String", "description": "cat or dog, lower case", "values": ["cat","dog"]}"#,
+        r#"{"field_name": "age", "data_type": "Int32", "description": "Age in years in 2024", "computed_as": "{\"$subtract\": [2024, \"$born\"]}"}"#,
+        "\n- A puppy is a dog under 1 year.\n",
+    ] {
+        assert!(context.contains(expected), "{expected} not in {context}");
+    }
+    assert_eq!(engine.arm().name(), "human-mdl");
+}
+
+#[tokio::test]
+async fn a_human_mdl_of_a_dev_database_is_refused_before_anything_is_sent() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile_and_edit(&mongo, knowledge.path(), |_, _| {}).await;
+
+    for arm in [
+        Arm::HumanMdl {
+            dir: knowledge.path().to_path_buf(),
+        },
+        Arm::OfficialHumanMdl {
+            dir: knowledge.path().to_path_buf(),
+        },
+    ] {
+        let engine = Engine::new(
+            ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+        .with_arm(arm);
+
+        let sample = engine.dataset().sample("dev_7").unwrap().clone();
+        let err = engine.ask(&sample).await.unwrap_err();
+
+        assert!(matches!(err, AskError::Leakage { .. }), "{err}");
+        assert!(engine.llm().requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn an_mdl_key_that_mqlc_would_not_send_is_an_error_not_silently_dropped() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile_and_edit(&mongo, knowledge.path(), |mdl, _| {
+        mdl["models"][0]["columns"][1]["expresion"] = "misspelt".into();
+    })
+    .await;
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::AutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    let err = engine.ask(&sample).await.unwrap_err();
+
+    assert!(err.to_string().contains("expresion"), "{err}");
     assert!(engine.llm().requests().is_empty());
 }

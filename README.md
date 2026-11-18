@@ -121,9 +121,10 @@ are refused before they reach the database.
 | `--data-dir` | `MQLC_DATA_DIR` | `data/AptMQL-Bench` |
 | `--mongo-uri` | `MQLC_MONGO_URI` | `mongodb://mqlc:mqlc@localhost:27017/?authSource=admin` |
 | `--model` | `MQLC_MODEL` | `claude-haiku-4-5` |
-| `--arm` | | `official` (or `official-prompt-keys`, below; `auto-mdl`, see [Auto MDL](#auto-mdl)) |
+| `--arm` | | `official` (experiment A: `auto-mdl`, `official-auto-mdl`, `official-evidence`, see [Experiment A](#experiment-a); diagnostics: `official-prompt-keys`, `official-tagged`, below) |
 | `--temperature` | | `0` |
 | `--mdl-dir` | `MQLC_MDL_DIR` | `mdl/auto` |
+| `--human-mdl-dir` | `MQLC_HUMAN_MDL_DIR` | `mdl/human` |
 | `--max-rows` | | `20` |
 
 `--arm official-prompt-keys` sends the same official description with each
@@ -261,6 +262,37 @@ run's records carry the arm, and the manifest records a hash of each
 database's rendered MDL: a rerun may add databases (a smoke run grown into a
 full split) but is refused once a database's MDL has changed. A database with no MDL
 project stops the run unrecorded.
+
+### Experiment A
+
+Experiment A compares where the schema knowledge comes from (ADR 0012), on
+dev:
+
+| `--arm` | Knowledge in the prompt |
+|---|---|
+| `official` | the official schema description (the paper's baseline) |
+| `auto-mdl` | the auto MDL in its place |
+| `official-auto-mdl` | the official description with the auto MDL merged into each field line |
+| `official-evidence` | the official description and each question's `mongodb_evidence` (the upper bound) |
+
+`official-auto-mdl` keeps each official field line as written and appends
+what the auto MDL says of the same path (`in_array`, `present`,
+`references`, values), with the observed type as `observed_type` where it
+differs from the official `data_type`; fields only the profile saw follow the
+official ones. The 343 questions without `mongodb_evidence` (140 on dev) get
+the official prompt unchanged under `official-evidence` and are scored like
+the rest, so all four arms answer the same questions.
+
+`--arm human-mdl` and `--arm official-human-mdl` do the same as the two MDL
+arms with a human MDL from `--human-mdl-dir` (default `mdl/human/<db_id>/`):
+an auto MDL a person added business definitions (`properties.description` on
+a model or column), formulas (a column with `"isCalculated": true` and an
+aggregation `expression`) and instructions to. A human MDL may only be
+written on train (ADR 0006), so these arms refuse any question on a dev
+database before sending anything. Every MDL file is read strictly: a key
+mqlc would not send, such as a misspelt one, is an error rather than
+silently left out. Each manifest invocation records the MDL directory
+(`knowledge_dir`) next to the per-database hashes.
 
 ### IR coverage
 

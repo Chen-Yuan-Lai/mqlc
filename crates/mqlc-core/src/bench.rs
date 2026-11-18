@@ -12,9 +12,8 @@ use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::Sample;
-use crate::engine::{Answer, Engine, Settings};
+use crate::engine::{Answer, AskError, Engine, Settings};
 use crate::llm::{ANTHROPIC_CONTEXT_WINDOW, BatchPoll, LlmClient, LlmRequest, Usage, with_retries};
-use crate::mdl::MdlError;
 use crate::pricing;
 
 const RESULTS: &str = "results.jsonl";
@@ -47,8 +46,9 @@ pub enum BenchError {
         path: PathBuf,
         source: serde_json::Error,
     },
-    #[error("cannot load the arm's knowledge: {0}")]
-    Knowledge(#[from] MdlError),
+    /// The arm's knowledge is missing or broken, found before anything is asked.
+    #[error(transparent)]
+    Knowledge(#[from] AskError),
     #[error("{path} line {line} is not a valid record: {source}")]
     Corrupt {
         path: PathBuf,
@@ -172,6 +172,10 @@ pub struct Invocation {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub mode: Mode,
+    /// Where the arm's MDL projects were read from, when it uses any. Their
+    /// content is fixed by `RunConfig::knowledge`; the directory may move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_dir: Option<String>,
     pub samples: usize,
 }
 
@@ -223,9 +227,14 @@ pub async fn run<L: LlmClient>(
             prompt_hash: engine.dataset().prompt().hash().to_string(),
             knowledge: engine.knowledge_hashes(samples.iter().map(|s| s.db_id.as_str()))?,
         },
-        engine.llm().endpoint(),
-        options.mode,
-        samples.len(),
+        Invocation {
+            started_at: now(),
+            mqlc_version: version(),
+            endpoint: Some(engine.llm().endpoint().to_string()),
+            mode: options.mode,
+            knowledge_dir: engine.arm().mdl_dir().map(|d| d.display().to_string()),
+            samples: samples.len(),
+        },
     )?;
     let results_path = run_dir.join(RESULTS);
     let earlier = load_records(&results_path)?;
@@ -566,9 +575,7 @@ fn save_batches(path: &Path, batches: &[SubmittedBatch]) -> Result<(), BenchErro
 fn record_invocation(
     path: &Path,
     config: RunConfig,
-    endpoint: &str,
-    mode: Mode,
-    samples: usize,
+    invocation: Invocation,
 ) -> Result<(), BenchError> {
     let io = |source| BenchError::Io {
         path: path.to_path_buf(),
@@ -609,13 +616,7 @@ fn record_invocation(
         },
         Err(e) => return Err(io(e)),
     };
-    manifest.invocations.push(Invocation {
-        started_at: now(),
-        mqlc_version: version(),
-        endpoint: Some(endpoint.to_string()),
-        mode,
-        samples,
-    });
+    manifest.invocations.push(invocation);
     let text = serde_json::to_string_pretty(&manifest).expect("manifest serializes");
     fs::write(path, text + "\n").map_err(io)
 }

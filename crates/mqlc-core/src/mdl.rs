@@ -2,7 +2,7 @@
 //! valid Wren MDL) and `instructions.json` beside it. MongoDB-only facts live
 //! in properties under the `mqlc.` namespace (ADR 0004).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,8 +33,11 @@ pub struct MdlProject {
 }
 
 /// The Wren MDL manifest. Wren has no MongoDB data source, so `dataSource`
-/// is left out.
+/// is left out. Every type here refuses keys it does not know: a key mqlc
+/// does not read (a typo in a human MDL, or a Wren feature such as views)
+/// would otherwise be dropped from the prompt without a word.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mdl {
     pub catalog: String,
     /// The database name.
@@ -46,7 +49,7 @@ pub struct Mdl {
 
 /// A collection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Model {
     pub name: String,
     pub table_reference: TableReference,
@@ -56,19 +59,29 @@ pub struct Model {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableReference {
     pub table: String,
 }
 
-/// A field path. Wren allows only string values in column properties.
+/// A field path, or (calculated) a formula over the model's fields. Wren
+/// allows only string values in column properties; a person writes
+/// `description` there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Column {
     pub name: String,
     /// The BSON types seen, most frequent first, joined by ` | `.
     pub r#type: String,
     #[serde(default)]
     pub not_null: bool,
+    /// Not stored in the documents: computed by `expression`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_calculated: bool,
+    /// A calculated column's formula, written by a person (for MongoDB, an
+    /// aggregation expression).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
 }
@@ -76,7 +89,7 @@ pub struct Column {
 /// A reference from a field of one model to another model's `_id`. Its
 /// `mqlc.path` property is the referring field's path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Relationship {
     pub name: String,
     /// The referring model, then the referred one.
@@ -98,6 +111,7 @@ pub enum JoinType {
 
 /// A note for the model, in WrenAI's instruction shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Instruction {
     pub instruction: String,
 }
@@ -135,11 +149,109 @@ impl MdlProject {
     /// description: models in name order, each under `Collection: <name>`
     /// with one JSON line per column, then the instructions.
     pub fn render(&self) -> String {
+        let references = self.references();
+        let mut parts: Vec<String> = self
+            .sorted_models()
+            .into_iter()
+            .map(|m| {
+                let lines: Vec<String> = m
+                    .columns
+                    .iter()
+                    .map(|c| render_line(&column_line(c, references.get(&(&*m.name, path(c))))))
+                    .collect();
+                format!(
+                    "{}\n{}",
+                    collection_header(&m.name, Some(m)),
+                    lines.join("\n")
+                )
+            })
+            .collect();
+        parts.extend(self.render_instructions(&[]));
+        parts.join("\n\n")
+    }
+
+    /// The official schema description (`official`: field lines per
+    /// collection) with this knowledge merged in, in the same layout: each
+    /// official field line keeps its text and gains what the MDL says of the
+    /// same path, the MDL's `data_type` as `observed_type` when it differs;
+    /// then each field only the MDL has, as `render` writes it. Collections
+    /// of either side, in name order.
+    pub fn render_with_official(&self, official: &[(String, Vec<String>)]) -> String {
+        use serde_json::Value;
+        let references = self.references();
+        let models: BTreeMap<&str, &Model> = self
+            .mdl
+            .models
+            .iter()
+            .map(|m| (m.name.as_str(), m))
+            .collect();
+        let official: BTreeMap<&str, &[String]> = official
+            .iter()
+            .map(|(name, lines)| (name.as_str(), lines.as_slice()))
+            .collect();
+        let mut names: Vec<&str> = models.keys().chain(official.keys()).copied().collect();
+        names.sort();
+        names.dedup();
+        let mut parts: Vec<String> = names
+            .into_iter()
+            .map(|name| {
+                let columns = models.get(name).map_or(&[][..], |m| m.columns.as_slice());
+                let line_of = |c: &Column| column_line(c, references.get(&(name, path(c))));
+                let mut merged = HashSet::new();
+                let mut lines: Vec<String> = official
+                    .get(name)
+                    .copied()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|text| {
+                        let field: Option<Value> = serde_json::from_str(text).ok();
+                        let field_name = field.as_ref().and_then(|f| f["field_name"].as_str());
+                        let official_type = field.as_ref().and_then(|f| f["data_type"].as_str());
+                        let Some(column) = columns.iter().find(|c| Some(path(c)) == field_name)
+                        else {
+                            return text.clone();
+                        };
+                        merged.insert(path(column));
+                        let extra: Vec<(&str, Value)> = line_of(column)
+                            .into_iter()
+                            .filter_map(|(key, value)| match key {
+                                "field_name" => None,
+                                "data_type" if value.as_str() == official_type => None,
+                                "data_type" => Some(("observed_type", value)),
+                                _ => Some((key, value)),
+                            })
+                            .collect();
+                        match text.strip_suffix('}') {
+                            Some(open) if !extra.is_empty() => {
+                                format!("{open}, {}}}", render_pairs(&extra))
+                            }
+                            _ => text.clone(),
+                        }
+                    })
+                    .collect();
+                lines.extend(
+                    columns
+                        .iter()
+                        .filter(|c| !merged.contains(path(c)))
+                        .map(|c| render_line(&line_of(c))),
+                );
+                let header = collection_header(name, models.get(name).copied());
+                format!("{header}\n{}", lines.join("\n"))
+            })
+            .collect();
+        parts.extend(self.render_instructions(&[OBSERVED_TYPE_NOTE]));
+        parts.join("\n\n")
+    }
+
+    fn sorted_models(&self) -> Vec<&Model> {
         let mut models: Vec<&Model> = self.mdl.models.iter().collect();
         models.sort_by(|a, b| a.name.cmp(&b.name));
-        // (model, path) -> the `_id` it refers to.
-        let references: BTreeMap<(&str, &str), String> = self
-            .mdl
+        models
+    }
+
+    /// (model, path) -> the `_id` it refers to.
+    fn references(&self) -> BTreeMap<(&str, &str), String> {
+        self.mdl
             .relationships
             .iter()
             .filter_map(|r| {
@@ -149,42 +261,48 @@ impl MdlProject {
                 };
                 Some(((from.as_str(), path), format!("{to}._id")))
             })
+            .collect()
+    }
+
+    /// The instructions, then `notes`, as one block; none if there are none.
+    fn render_instructions(&self, notes: &[&str]) -> Option<String> {
+        let lines: Vec<String> = self
+            .instructions
+            .iter()
+            .map(|i| i.instruction.as_str())
+            .chain(notes.iter().copied())
+            .map(|i| format!("- {i}"))
             .collect();
-        let mut parts: Vec<String> = models
-            .into_iter()
-            .map(|m| {
-                let lines: Vec<String> = m
-                    .columns
-                    .iter()
-                    .map(|c| {
-                        let path = c.properties.get("mqlc.path").unwrap_or(&c.name);
-                        render_column(c, references.get(&(m.name.as_str(), path.as_str())))
-                    })
-                    .collect();
-                format!("Collection: {}\n{}", m.name, lines.join("\n"))
-            })
-            .collect();
-        if !self.instructions.is_empty() {
-            let notes: Vec<String> = self
-                .instructions
-                .iter()
-                .map(|i| format!("- {}", i.instruction))
-                .collect();
-            parts.push(format!("Instructions:\n{}", notes.join("\n")));
-        }
-        parts.join("\n\n")
+        (!lines.is_empty()).then(|| format!("Instructions:\n{}", lines.join("\n")))
     }
 }
 
-/// `{"field_name", "data_type", ...}` with arrays shown as `Array<element
-/// types>`, presence only when the field is sometimes missing, the `_id` it
-/// refers to (if any, instead of its values), then its values: all of them,
-/// or their format, range and most common ones.
-fn render_column(c: &Column, references: Option<&String>) -> String {
+/// What `render_with_official` adds to the instructions: the profiler wrote
+/// them for `data_type` as the types seen, which an official line's is not.
+const OBSERVED_TYPE_NOTE: &str = "In a field with a field_description, data_type is the official description's type, not the types seen; the types seen, in the form described above for data_type, are its observed_type where they differ. A field without a field_description was seen only in the sampled documents.";
+
+/// `Collection: <name>`, then the model's `description` (a person's) if it
+/// has one.
+fn collection_header(name: &str, model: Option<&Model>) -> String {
+    match model.and_then(|m| m.properties.get("description")?.as_str()) {
+        Some(description) => format!("Collection: {name}\nDescription: {description}"),
+        None => format!("Collection: {name}"),
+    }
+}
+
+fn path(c: &Column) -> &str {
+    c.properties.get("mqlc.path").unwrap_or(&c.name)
+}
+
+/// `{"field_name", "data_type", ...}` as key-value pairs, with arrays shown
+/// as `Array<element types>`, a person's `description` and formula
+/// (`computed_as`) if any, presence only when the field is sometimes missing,
+/// the `_id` it refers to (if any, instead of its values), then its values:
+/// all of them, or their format, range and most common ones.
+fn column_line(c: &Column, references: Option<&String>) -> Vec<(&'static str, serde_json::Value)> {
     use serde_json::Value;
     let prop = |k: &str| c.properties.get(k).map(String::as_str);
     let parsed = |k: &str| prop(k).and_then(|v| serde_json::from_str::<Value>(v).ok());
-    let path = prop("mqlc.path").unwrap_or(&c.name);
     let data_type = match prop("mqlc.elementTypes") {
         Some(elements) => c
             .r#type
@@ -197,8 +315,16 @@ fn render_column(c: &Column, references: Option<&String>) -> String {
             .join(" | "),
         None => c.r#type.clone(),
     };
-    let mut line: Vec<(&str, Value)> =
-        vec![("field_name", path.into()), ("data_type", data_type.into())];
+    let mut line: Vec<(&str, Value)> = vec![
+        ("field_name", path(c).into()),
+        ("data_type", data_type.into()),
+    ];
+    if let Some(description) = prop("description") {
+        line.push(("description", description.into()));
+    }
+    if let (true, Some(expression)) = (c.is_calculated, &c.expression) {
+        line.push(("computed_as", expression.as_str().into()));
+    }
     if let Some(array) = prop("mqlc.inArray") {
         line.push(("in_array", array.into()));
     }
@@ -208,7 +334,7 @@ fn render_column(c: &Column, references: Option<&String>) -> String {
     // The ids a reference holds say nothing its target does not.
     if let Some(to) = references {
         line.push(("references", to.as_str().into()));
-        return render_line(&line);
+        return line;
     }
     if let Some(values) = parsed("mqlc.enum") {
         line.push(("values", values));
@@ -229,18 +355,23 @@ fn render_column(c: &Column, references: Option<&String>) -> String {
             .collect();
         line.push(("common_values", Value::Array(values)));
     }
-    render_line(&line)
+    line
 }
 
 /// Spaced like the official description files.
 fn render_line(line: &[(&str, serde_json::Value)]) -> String {
+    format!("{{{}}}", render_pairs(line))
+}
+
+/// `"key": value, ...` without the braces.
+fn render_pairs(line: &[(&str, serde_json::Value)]) -> String {
     use serde_json::Value;
     let json = |v: &Value| serde_json::to_string(v).expect("JSON serializes");
     let pairs: Vec<String> = line
         .iter()
         .map(|(k, v)| format!("{}: {}", json(&(*k).into()), json(v)))
         .collect();
-    format!("{{{}}}", pairs.join(", "))
+    pairs.join(", ")
 }
 
 /// `"<present>/<enclosing>"` as a rounded-down percentage, or `None` when

@@ -63,11 +63,16 @@ struct Cli {
     #[arg(long, env = "MQLC_CONTEXT_WINDOW", global = true)]
     context_window: Option<u32>,
 
-    /// Knowledge in the prompt: the official schema description, the same
-    /// with each field rewritten to the keys the official prompt names
-    /// (`official-prompt-keys`) or with each collection in a tag
-    /// (`official-tagged`), or the auto MDL that `mqlc profile` wrote to
-    /// --mdl-dir in its place.
+    /// Knowledge in the prompt. Experiment A: the official schema
+    /// description, the auto MDL that `mqlc profile` wrote to --mdl-dir in
+    /// its place (`auto-mdl`) or merged into it field by field
+    /// (`official-auto-mdl`), or the official description with each
+    /// question's mongodb_evidence (`official-evidence`). `human-mdl` and
+    /// `official-human-mdl` do the same with the human MDL in
+    /// --human-mdl-dir, on train databases only. Diagnostics: the official
+    /// description with each field rewritten to the keys the official prompt
+    /// names (`official-prompt-keys`) or with each collection in a tag
+    /// (`official-tagged`).
     #[arg(long, value_enum, default_value_t = ArmArg::Official, global = true)]
     arm: ArmArg,
 
@@ -89,6 +94,16 @@ struct Cli {
     #[arg(long, env = "MQLC_MDL_DIR", default_value = "mdl/auto", global = true)]
     mdl_dir: PathBuf,
 
+    /// Human MDL projects, one directory per train database: auto MDL a
+    /// person added descriptions, formulas and instructions to.
+    #[arg(
+        long,
+        env = "MQLC_HUMAN_MDL_DIR",
+        default_value = "mdl/human",
+        global = true
+    )]
+    human_mdl_dir: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -99,6 +114,10 @@ enum ArmArg {
     OfficialPromptKeys,
     OfficialTagged,
     AutoMdl,
+    OfficialAutoMdl,
+    OfficialEvidence,
+    HumanMdl,
+    OfficialHumanMdl,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -266,6 +285,16 @@ async fn main() -> Result<()> {
         ArmArg::OfficialTagged => Arm::OfficialTagged,
         ArmArg::AutoMdl => Arm::AutoMdl {
             dir: cli.mdl_dir.clone(),
+        },
+        ArmArg::OfficialAutoMdl => Arm::OfficialAutoMdl {
+            dir: cli.mdl_dir.clone(),
+        },
+        ArmArg::OfficialEvidence => Arm::OfficialEvidence,
+        ArmArg::HumanMdl => Arm::HumanMdl {
+            dir: cli.human_mdl_dir.clone(),
+        },
+        ArmArg::OfficialHumanMdl => Arm::OfficialHumanMdl {
+            dir: cli.human_mdl_dir.clone(),
         },
     };
     if let Some(budget) = cli.thinking_budget {

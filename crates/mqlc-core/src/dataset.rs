@@ -160,6 +160,15 @@ impl Dataset {
         self.samples.iter().find(|s| s.sample_id == sample_id)
     }
 
+    /// The split whose questions are on `db_id` (the splits share no
+    /// database).
+    pub fn split_of(&self, db_id: &str) -> Option<&str> {
+        self.samples
+            .iter()
+            .find(|s| s.db_id == db_id)
+            .map(|s| s.split.as_str())
+    }
+
     pub fn prompt(&self) -> &OfficialPrompt {
         &self.prompt
     }
@@ -229,6 +238,27 @@ impl Dataset {
         })
     }
 
+    /// The official schema description of one database as its field lines
+    /// (blank lines dropped), per collection in name order.
+    pub fn official_fields(
+        &self,
+        split: &str,
+        db_id: &str,
+    ) -> Result<Vec<(String, Vec<String>)>, DatasetError> {
+        self.description_files(split, db_id)?
+            .into_iter()
+            .map(|(name, path)| {
+                let lines = read(&path)?
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                Ok((name, lines))
+            })
+            .collect()
+    }
+
     /// Every `collections_description/<collection>.jsonl` of a database in
     /// name order, each rendered by `render` from its collection name and
     /// path, one blank line apart.
@@ -238,6 +268,21 @@ impl Dataset {
         db_id: &str,
         render: impl Fn(&str, &Path) -> Result<String, DatasetError>,
     ) -> Result<String, DatasetError> {
+        let parts = self
+            .description_files(split, db_id)?
+            .iter()
+            .map(|(name, path)| render(name, path))
+            .collect::<Result<Vec<_>, DatasetError>>()?;
+        Ok(parts.join("\n\n"))
+    }
+
+    /// Each `collections_description/<collection>.jsonl` of a database as its
+    /// collection name and path, in name order.
+    fn description_files(
+        &self,
+        split: &str,
+        db_id: &str,
+    ) -> Result<Vec<(String, PathBuf)>, DatasetError> {
         let dir = self
             .root
             .join("databases")
@@ -257,14 +302,10 @@ impl Dataset {
             return Err(no_schema());
         }
         files.sort();
-        let parts = files
-            .iter()
-            .map(|p| {
-                let name = p.file_stem().unwrap().to_string_lossy();
-                render(&name, p)
-            })
-            .collect::<Result<Vec<_>, DatasetError>>()?;
-        Ok(parts.join("\n\n"))
+        Ok(files
+            .into_iter()
+            .map(|p| (p.file_stem().unwrap().to_string_lossy().into_owned(), p))
+            .collect())
     }
 }
 

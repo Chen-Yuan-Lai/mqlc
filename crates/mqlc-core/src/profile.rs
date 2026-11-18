@@ -466,6 +466,8 @@ impl Fields {
                 name: f.path.clone(),
                 r#type: f.types.joined(),
                 not_null,
+                is_calculated: false,
+                expression: None,
                 properties,
             });
             // Elements of arrays, which may be empty, are never always there.

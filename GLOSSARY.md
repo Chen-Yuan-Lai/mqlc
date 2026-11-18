@@ -75,7 +75,7 @@ _Avoid_：hint、external knowledge（中英混用時）
 _Avoid_：profiler MDL、MDL 草稿
 
 **Human MDL（人工 MDL）**：
-在 auto MDL 上由人補寫公式與業務定義後的版本；撰寫時不看 dev 的 question。
+在 auto MDL 上由人補寫公式、業務定義與 instructions 後的版本；撰寫時不看 dev 的 question。
 
 **Knowledge mode（知識模式）**：
 knowledge 放進 prompt 的方式：full（全部放入）、rag（只放檢索到的 collection）、auto（由 context 大小決定）。
