@@ -25,23 +25,39 @@ compares with the paper.
 Per-database scores are in each run's [`summary.json`](runs/baseline-all/summary.json).
 
 The baseline is 5.8 points of Soft-EX under the paper, beyond the ±3 we
-aimed for, and we could not find why (#5). Strict-EX is as far under (5.5)
-and Exec-Rate 1 point, so the model answers fewer questions right rather
-than the scorer counting differently: the scorer gives the gold pipelines
-[99.47%](runs/gold-as-pred/summary.json) Soft-EX against themselves, 5
-replies fail to parse and 4 queries time out. The paper does not give its sampling settings or how it
-joined the schema files; two train runs rule out both as the cause (paired
-difference from the baseline's train half, 95% interval):
+aimed for, and we could not find why (#5, #19). Strict-EX is as far under
+(5.5) and Exec-Rate 1 point, so the model answers fewer questions right
+rather than the scorer counting differently: the scorer gives the gold
+pipelines [99.47%](runs/gold-as-pred/summary.json) Soft-EX against
+themselves, 5 replies fail to parse and 4 queries time out. The dataset has
+not changed since it was published, and `claude-haiku-4-5` has one snapshot
+(`20251001`). The paper does not give its sampling settings, message layout
+or how it joined the schema files; train runs test each (paired difference
+from the baseline's train half, 95% interval):
 
 | Run | Split | Soft-EX | vs baseline | Cost (USD) |
 |---|---|--:|--:|--:|
 | [`--arm official-prompt-keys`](runs/prompt-keys-train/manifest.json) | train | 39.33 | −0.28 ± 1.19 | 2.55 |
 | [`--temperature 1`](runs/temp1-train/manifest.json) | train | 38.31 | −1.31 ± 1.06 | 2.71 |
+| [`--arm official-tagged`](runs/tagged-train/manifest.json) | train | 39.33 | −0.28 ± 1.10 | 2.70 |
+| [`--single-message`](runs/single-message-train/manifest.json) | train | 39.27 | −0.34 ± 0.96 | 2.70 |
+| [`--temperature 1 --thinking-budget 2048`](runs/thinking-train/manifest.json) | train | 40.64 | +1.02 ± 1.66 | 6.08 |
+| [sync instead of batch](runs/sync-train200/manifest.json) | first 96 of train | 32.29 | −2.08 ± 2.87 | 0.55 |
+
+The tagged layout and the single message rule themselves out. Thinking does
+not: against the same temperature without it, it gains 2.33 ± 1.68, so it may
+be part of the gap, though under half of it; it has not been run on all
+3,186. The sync run stopped at 96 of its 200 questions when the API credit
+ran out, and all 96 are from works_cycles, so it only hints that batch
+changes nothing (2 of the 96 changed). Rescoring the baseline's records on
+`mongo:8.0` instead of 8.2 gives [42.12](runs/baseline-all-mongo80/summary.json)
+on all, 44.80 on dev and 39.95 on train: 16 questions change Soft-EX (6 of
+them on dev, cancelling out).
 
 Later experiments compare with this baseline, not the paper. The baseline ran
-at f8e38ab (its manifest says `-dirty` for an edit outside the code); the two
-train runs need the options added by the commit that adds this table. The
-whole reproduction cost USD 9.34.
+at f8e38ab (its manifest says `-dirty` for an edit outside the code); the
+train runs need the options added with them. The reproduction cost USD 9.34
+(#5) and the investigation USD 12.21 (#19).
 
 ## Setup
 
@@ -109,8 +125,14 @@ are refused before they reach the database.
 `--arm official-prompt-keys` sends the same official description with each
 field line rewritten to the keys the official prompt names (`field_name`,
 `field_description`, `data_format`, `value_description`): the dataset's files
-call `data_format` `data_type` and add `required`. It is a guess at how the
-paper sent the description (#5).
+call `data_format` `data_type` and add `required`. `--arm official-tagged`
+wraps each collection's lines in `<collection name="...">` instead of putting
+them under `Collection: <name>`. `--single-message` sends the system prompt
+at the start of the user turn instead of as the system prompt.
+`--thinking-budget N` turns on extended thinking with N tokens on top of the
+reply's 4,096 (Anthropic only, with `--temperature 1`, which the API
+requires). All are guesses at how the paper ran (#5, #19); the manifest
+records each.
 
 ### Other backends
 

@@ -169,7 +169,25 @@ impl Dataset {
     /// `Collection: <name>` header. The paper does not publish how it joined the
     /// files, so this layout is our own.
     pub fn schema_description(&self, split: &str, db_id: &str) -> Result<String, DatasetError> {
-        self.joined_descriptions(split, db_id, |p| Ok(read(p)?.trim().to_string()))
+        self.joined_descriptions(split, db_id, |name, path| {
+            Ok(format!("Collection: {name}\n{}", read(path)?.trim()))
+        })
+    }
+
+    /// The official schema description with each file wrapped in a
+    /// `<collection name="...">` tag instead of under a `Collection:` header,
+    /// another guess at the paper's layout (#19).
+    pub fn tagged_schema_description(
+        &self,
+        split: &str,
+        db_id: &str,
+    ) -> Result<String, DatasetError> {
+        self.joined_descriptions(split, db_id, |name, path| {
+            Ok(format!(
+                "<collection name=\"{name}\">\n{}\n</collection>",
+                read(path)?.trim()
+            ))
+        })
     }
 
     /// The official schema description with each field line rewritten to the
@@ -181,8 +199,8 @@ impl Dataset {
         split: &str,
         db_id: &str,
     ) -> Result<String, DatasetError> {
-        self.joined_descriptions(split, db_id, |path| {
-            read(path)?
+        self.joined_descriptions(split, db_id, |name, path| {
+            let fields = read(path)?
                 .lines()
                 .enumerate()
                 .filter(|(_, line)| !line.trim().is_empty())
@@ -206,19 +224,19 @@ impl Dataset {
                         quoted(&field.value_description),
                     ))
                 })
-                .collect::<Result<Vec<_>, _>>()
-                .map(|lines| lines.join("\n"))
+                .collect::<Result<Vec<_>, DatasetError>>()?;
+            Ok(format!("Collection: {name}\n{}", fields.join("\n")))
         })
     }
 
     /// Every `collections_description/<collection>.jsonl` of a database in
-    /// name order, each rendered by `render` under a `Collection: <name>`
-    /// header, one blank line apart.
+    /// name order, each rendered by `render` from its collection name and
+    /// path, one blank line apart.
     fn joined_descriptions(
         &self,
         split: &str,
         db_id: &str,
-        render: impl Fn(&Path) -> Result<String, DatasetError>,
+        render: impl Fn(&str, &Path) -> Result<String, DatasetError>,
     ) -> Result<String, DatasetError> {
         let dir = self
             .root
@@ -243,7 +261,7 @@ impl Dataset {
             .iter()
             .map(|p| {
                 let name = p.file_stem().unwrap().to_string_lossy();
-                Ok(format!("Collection: {name}\n{}", render(p)?))
+                render(&name, p)
             })
             .collect::<Result<Vec<_>, DatasetError>>()?;
         Ok(parts.join("\n\n"))

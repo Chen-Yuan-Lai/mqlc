@@ -98,6 +98,80 @@ async fn the_prompt_keys_arm_rewrites_each_field_to_the_keys_the_official_prompt
 }
 
 #[tokio::test]
+async fn the_tagged_arm_wraps_each_collection_in_a_collection_tag() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::OfficialTagged);
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    assert_eq!(
+        engine.llm().requests()[0].context,
+        "<MongoDB Schema Description>\n\n\
+         <collection name=\"animals\">\n\
+         {\"field_name\": \"name\", \"field_description\": \"Pet name\", \"data_type\": \"String\", \"required\": true, \"value_description\": \"\"}\n\
+         {\"field_name\": \"species\", \"field_description\": \"Kind of animal\", \"data_type\": \"String\", \"required\": true, \"value_description\": \"cat, dog\"}\n\
+         </collection>\
+         \n\n</MongoDB Schema Description>"
+    );
+}
+
+#[tokio::test]
+async fn a_single_message_puts_the_system_prompt_at_the_start_of_the_user_turn() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_single_message(true);
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let request = &engine.llm().requests()[0];
+    assert_eq!(request.system, "");
+    assert!(request.context.starts_with(
+        "# ROLE\nYou are an expert MongoDB engineer.\n\n<MongoDB Schema Description>\n\nCollection: animals\n"
+    ));
+    assert!(request.user.starts_with("<Natural Language Request>\n"));
+    assert!(engine.settings().single_message);
+}
+
+#[tokio::test]
+async fn thinking_gets_its_budget_on_top_of_the_reply_tokens() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_thinking_budget(Some(2048));
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let request = &engine.llm().requests()[0];
+    assert_eq!(request.thinking_budget, Some(2048));
+    assert_eq!(request.max_tokens, 4096 + 2048);
+    let settings = engine.settings();
+    assert!(settings.thinking);
+    assert_eq!(settings.thinking_budget, Some(2048));
+    assert_eq!(settings.max_tokens, 4096 + 2048);
+}
+
+#[tokio::test]
 async fn sends_the_temperature_it_was_given() {
     let data = dataset_dir();
     let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;

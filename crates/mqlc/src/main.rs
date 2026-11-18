@@ -65,7 +65,8 @@ struct Cli {
 
     /// Knowledge in the prompt: the official schema description, the same
     /// with each field rewritten to the keys the official prompt names
-    /// (`official-prompt-keys`), or the auto MDL that `mqlc profile` wrote to
+    /// (`official-prompt-keys`) or with each collection in a tag
+    /// (`official-tagged`), or the auto MDL that `mqlc profile` wrote to
     /// --mdl-dir in its place.
     #[arg(long, value_enum, default_value_t = ArmArg::Official, global = true)]
     arm: ArmArg,
@@ -73,6 +74,16 @@ struct Cli {
     /// Sampling temperature, recorded in the run manifest.
     #[arg(long, default_value_t = engine::DEFAULT_TEMPERATURE, global = true)]
     temperature: f32,
+
+    /// Send the system prompt at the start of the user turn instead of as
+    /// the system prompt.
+    #[arg(long, global = true)]
+    single_message: bool,
+
+    /// Turn on extended thinking with this many tokens, at least 1024
+    /// (Anthropic only; the API requires --temperature 1 with it).
+    #[arg(long, global = true)]
+    thinking_budget: Option<u32>,
 
     /// Auto MDL projects, one directory per database (`mqlc profile --out`).
     #[arg(long, env = "MQLC_MDL_DIR", default_value = "mdl/auto", global = true)]
@@ -86,6 +97,7 @@ struct Cli {
 enum ArmArg {
     Official,
     OfficialPromptKeys,
+    OfficialTagged,
     AutoMdl,
 }
 
@@ -251,10 +263,25 @@ async fn main() -> Result<()> {
     let arm = match cli.arm {
         ArmArg::Official => Arm::Official,
         ArmArg::OfficialPromptKeys => Arm::OfficialPromptKeys,
+        ArmArg::OfficialTagged => Arm::OfficialTagged,
         ArmArg::AutoMdl => Arm::AutoMdl {
             dir: cli.mdl_dir.clone(),
         },
     };
+    if let Some(budget) = cli.thinking_budget {
+        anyhow::ensure!(
+            budget >= 1024,
+            "--thinking-budget must be at least 1024 (the API's minimum)"
+        );
+        anyhow::ensure!(
+            cli.backend == BackendArg::Anthropic,
+            "--thinking-budget needs --backend anthropic"
+        );
+        anyhow::ensure!(
+            cli.temperature == 1.0,
+            "--thinking-budget needs --temperature 1 (the API requires it with thinking)"
+        );
+    }
     match cli.backend {
         BackendArg::Anthropic => {
             let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
@@ -264,7 +291,9 @@ async fn main() -> Result<()> {
                 cli.command,
                 Engine::new(llm, mongo, dataset)
                     .with_arm(arm)
-                    .with_temperature(cli.temperature),
+                    .with_temperature(cli.temperature)
+                    .with_single_message(cli.single_message)
+                    .with_thinking_budget(cli.thinking_budget),
             )
             .await
         }
@@ -281,7 +310,9 @@ async fn main() -> Result<()> {
                 cli.command,
                 Engine::new(llm, mongo, dataset)
                     .with_arm(arm)
-                    .with_temperature(cli.temperature),
+                    .with_temperature(cli.temperature)
+                    .with_single_message(cli.single_message)
+                    .with_thinking_budget(cli.thinking_budget),
             )
             .await
         }

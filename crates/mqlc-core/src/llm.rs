@@ -14,6 +14,8 @@ pub struct LlmRequest {
     pub user: String,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Extended thinking with this budget (Anthropic only).
+    pub thinking_budget: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,15 +193,10 @@ enum BatchResult {
 
 impl AnthropicClient {
     fn params(&self, request: &LlmRequest) -> serde_json::Value {
-        serde_json::json!({
+        let mut params = serde_json::json!({
             "model": self.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "system": [{
-                "type": "text",
-                "text": request.system,
-                "cache_control": { "type": "ephemeral" },
-            }],
             "messages": [{
                 "role": "user",
                 "content": [
@@ -211,7 +208,19 @@ impl AnthropicClient {
                     { "type": "text", "text": request.user },
                 ],
             }],
-        })
+        });
+        if let Some(budget) = request.thinking_budget {
+            params["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
+        }
+        // The API refuses an empty system text block.
+        if !request.system.is_empty() {
+            params["system"] = serde_json::json!([{
+                "type": "text",
+                "text": request.system,
+                "cache_control": { "type": "ephemeral" },
+            }]);
+        }
+        params
     }
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, LlmError> {
@@ -402,14 +411,19 @@ impl LlmClient for OpenAiClient {
     }
 
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let user = format!("{}\n\n{}", request.context, request.user);
+        let mut messages = vec![serde_json::json!({ "role": "user", "content": user })];
+        if !request.system.is_empty() {
+            messages.insert(
+                0,
+                serde_json::json!({ "role": "system", "content": request.system }),
+            );
+        }
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "messages": [
-                { "role": "system", "content": request.system },
-                { "role": "user", "content": format!("{}\n\n{}", request.context, request.user) },
-            ],
+            "messages": messages,
         });
         let mut http = self
             .http

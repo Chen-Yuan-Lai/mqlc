@@ -15,6 +15,7 @@ use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Usage, with_retri
 use crate::mdl::{MdlError, MdlProject};
 use crate::reply::{ParseError, parse_reply};
 
+/// Room for the reply itself; thinking gets its budget on top.
 const MAX_TOKENS: u32 = 4096;
 /// The temperature of every run unless `Engine::with_temperature` says otherwise.
 pub const DEFAULT_TEMPERATURE: f32 = 0.0;
@@ -90,11 +91,19 @@ pub struct Answer {
 pub struct Settings {
     pub temperature: f32,
     pub max_tokens: u32,
+    /// Always `thinking_budget.is_some()`; kept because every manifest has it.
     pub thinking: bool,
+    /// Absent from manifests written before thinking could be turned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
     /// Only `full` until retrieval lands.
     pub knowledge_mode: String,
     /// Whether the static-check repair loop is on (not implemented yet).
     pub ir: bool,
+    /// The system prompt opens the user turn instead of going as the system
+    /// prompt (#19). Absent from manifests written before it existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_message: bool,
 }
 
 /// Where the schema knowledge in the prompt comes from (experiment A).
@@ -106,6 +115,10 @@ pub enum Arm {
     /// the official prompt names (`data_type` as `data_format`, no
     /// `required`): a guess at how the paper sent it (#5).
     OfficialPromptKeys,
+    /// The official schema description with each collection in a
+    /// `<collection name="...">` tag instead of under a `Collection:` header
+    /// (#19).
+    OfficialTagged,
     /// The auto MDL that `mqlc profile` wrote to `dir/<db_id>/`, in place of
     /// the official description.
     AutoMdl { dir: PathBuf },
@@ -117,6 +130,7 @@ impl Arm {
         match self {
             Self::Official => "official",
             Self::OfficialPromptKeys => "official-prompt-keys",
+            Self::OfficialTagged => "official-tagged",
             Self::AutoMdl { .. } => "auto-mdl",
         }
     }
@@ -128,6 +142,8 @@ pub struct Engine<L> {
     dataset: Dataset,
     arm: Arm,
     temperature: f32,
+    single_message: bool,
+    thinking_budget: Option<u32>,
     /// Rendered MDL per database, loaded once so every prompt of a run
     /// matches the hash in its manifest.
     mdl: Mutex<HashMap<String, String>>,
@@ -141,6 +157,8 @@ impl<L: LlmClient> Engine<L> {
             dataset,
             arm: Arm::Official,
             temperature: DEFAULT_TEMPERATURE,
+            single_message: false,
+            thinking_budget: None,
             mdl: Mutex::default(),
         }
     }
@@ -153,6 +171,24 @@ impl<L: LlmClient> Engine<L> {
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = temperature;
         self
+    }
+
+    /// Sends the system prompt at the start of the user turn, before the
+    /// schema block, and no system prompt.
+    pub fn with_single_message(mut self, single_message: bool) -> Self {
+        self.single_message = single_message;
+        self
+    }
+
+    /// Turns on extended thinking with this many tokens to think in, on top
+    /// of the reply's own room.
+    pub fn with_thinking_budget(mut self, budget: Option<u32>) -> Self {
+        self.thinking_budget = budget;
+        self
+    }
+
+    fn max_tokens(&self) -> u32 {
+        MAX_TOKENS + self.thinking_budget.unwrap_or(0)
     }
 
     pub fn arm(&self) -> &Arm {
@@ -170,10 +206,12 @@ impl<L: LlmClient> Engine<L> {
     pub fn settings(&self) -> Settings {
         Settings {
             temperature: self.temperature,
-            max_tokens: MAX_TOKENS,
-            thinking: false,
+            max_tokens: self.max_tokens(),
+            thinking: self.thinking_budget.is_some(),
+            thinking_budget: self.thinking_budget,
             knowledge_mode: "full".to_string(),
             ir: false,
+            single_message: self.single_message,
         }
     }
 
@@ -252,14 +290,26 @@ impl<L: LlmClient> Engine<L> {
             Arm::OfficialPromptKeys => self
                 .dataset
                 .prompt_keys_schema_description(&sample.split, &sample.db_id)?,
+            Arm::OfficialTagged => self
+                .dataset
+                .tagged_schema_description(&sample.split, &sample.db_id)?,
             Arm::AutoMdl { .. } => self.mdl(&sample.db_id)?,
         };
+        let (system, context) = if self.single_message {
+            (
+                String::new(),
+                format!("{}\n\n{}", prompt.system, prompt.schema_block(&schema)),
+            )
+        } else {
+            (prompt.system.clone(), prompt.schema_block(&schema))
+        };
         Ok(LlmRequest {
-            system: prompt.system.clone(),
-            context: prompt.schema_block(&schema),
+            system,
+            context,
             user: prompt.question_block(&sample.question, None),
-            max_tokens: MAX_TOKENS,
+            max_tokens: self.max_tokens(),
             temperature: self.temperature,
+            thinking_budget: self.thinking_budget,
         })
     }
 
@@ -272,7 +322,7 @@ impl<L: LlmClient> Engine<L> {
         latency: Option<Duration>,
     ) -> Result<Answer, AskError> {
         let parsed = if response.truncated {
-            Err(AnswerError::Truncated(MAX_TOKENS))
+            Err(AnswerError::Truncated(self.max_tokens()))
         } else {
             parse_reply(&response.text).map_err(AnswerError::from)
         };

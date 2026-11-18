@@ -6,6 +6,11 @@
 !/runs/prompt-keys-train/
 !/runs/temp1-train/
 !/runs/gold-as-pred/
+!/runs/baseline-all-mongo80/
+!/runs/tagged-train/
+!/runs/single-message-train/
+!/runs/thinking-train/
+!/runs/sync-train200/
 /runs/*/*
 !/runs/*/manifest.json
 !/runs/*/summary.json
