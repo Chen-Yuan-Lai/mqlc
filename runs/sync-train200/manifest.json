@@ -25,6 +25,13 @@
       "endpoint": "https://api.anthropic.com",
       "mode": "sync",
       "samples": 200
+    },
+    {
+      "started_at": "2026-11-18T06:58:37.941Z",
+      "mqlc_version": "0.1.0+e3e3c85b3bb8-dirty",
+      "endpoint": "https://api.anthropic.com",
+      "mode": "sync",
+      "samples": 200
     }
   ]
 }

@@ -11,6 +11,7 @@
 !/runs/single-message-train/
 !/runs/thinking-train/
 !/runs/sync-train200/
+!/runs/thinking-all/
 /runs/*/*
 !/runs/*/manifest.json
 !/runs/*/summary.json

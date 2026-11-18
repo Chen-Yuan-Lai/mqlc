@@ -21,6 +21,8 @@ compares with the paper.
 | [baseline](runs/baseline-all/manifest.json) | **dev** | 1,424 | 97.75 | **44.80** | 18.68 | |
 | [baseline](runs/baseline-all/manifest.json) | train | 1,762 | 96.99 | 39.61 | 17.88 | |
 | [baseline](runs/baseline-all/manifest.json) | all | 3,186 | 97.33 | 41.93 | 18.24 | 4.08 (batch) |
+| [thinking](runs/thinking-all/manifest.json) (`--temperature 1 --thinking-budget 2048`) | dev | 1,424 | 99.30 | 45.72 | 22.19 | |
+| [thinking](runs/thinking-all/manifest.json) | all | 3,186 | 98.31 | 42.91 | 20.21 | 10.18 (batch) |
 
 Per-database scores are in each run's [`summary.json`](runs/baseline-all/summary.json).
 
@@ -42,14 +44,16 @@ from the baseline's train half, 95% interval):
 | [`--arm official-tagged`](runs/tagged-train/manifest.json) | train | 39.33 | −0.28 ± 1.10 | 2.70 |
 | [`--single-message`](runs/single-message-train/manifest.json) | train | 39.27 | −0.34 ± 0.96 | 2.70 |
 | [`--temperature 1 --thinking-budget 2048`](runs/thinking-train/manifest.json) | train | 40.64 | +1.02 ± 1.66 | 6.08 |
-| [sync instead of batch](runs/sync-train200/manifest.json) | first 96 of train | 32.29 | −2.08 ± 2.87 | 0.55 |
+| [sync instead of batch](runs/sync-train200/manifest.json) | first 200 of train | 35.00 | −0.50 ± 2.20 | 1.12 |
 
 The tagged layout and the single message rule themselves out. Thinking does
-not: against the same temperature without it, it gains 2.33 ± 1.68, so it may
-be part of the gap, though under half of it; it has not been run on all
-3,186. The sync run stopped at 96 of its 200 questions when the API credit
-ran out, and all 96 are from works_cycles, so it only hints that batch
-changes nothing (2 of the 96 changed). Rescoring the baseline's records on
+not: against the same temperature without it, it gains 2.33 ± 1.68 on train,
+and on all 3,186 it brings Exec-Rate to the paper's (98.31 against 98.34) and
+gains 0.97 ± 1.23 Soft-EX and 1.98 ± 1.21 Strict-EX over the baseline. That
+still leaves Soft-EX 4.8 points under the paper, beyond ±3. The baseline
+stays temperature 0 without thinking, the paper's stated setting being
+unknown either way. The sync run's 200 questions are all from works_cycles,
+so it only shows that batch changes nothing there (5 of 200 changed). Rescoring the baseline's records on
 `mongo:8.0` instead of 8.2 gives [42.12](runs/baseline-all-mongo80/summary.json)
 on all, 44.80 on dev and 39.95 on train: 16 questions change Soft-EX (6 of
 them on dev, cancelling out).
@@ -57,7 +61,7 @@ them on dev, cancelling out).
 Later experiments compare with this baseline, not the paper. The baseline ran
 at f8e38ab (its manifest says `-dirty` for an edit outside the code); the
 train runs need the options added with them. The reproduction cost USD 9.34
-(#5) and the investigation USD 12.21 (#19).
+(#5) and the investigation USD 16.89 (#19).
 
 ## Setup
 
