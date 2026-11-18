@@ -823,6 +823,7 @@ async fn a_run_records_which_knowledge_each_arm_sent() {
         .save(&knowledge.path().join(DB_ID))
         .unwrap();
     let dir = knowledge.path().to_path_buf();
+    let mut hashes = Vec::new();
 
     for (arm, name, mdl_dir) in [
         (Arm::Official, "official", None),
@@ -861,22 +862,62 @@ async fn a_run_records_which_knowledge_each_arm_sent() {
         assert_eq!(records(run_dir.path())[0].arm, name);
         let invocation = &manifest["invocations"][0];
         match mdl_dir {
-            Some(dir) => {
-                assert_eq!(invocation["knowledge_dir"], dir.display().to_string());
-                assert!(
-                    manifest["config"]["knowledge"][DB_ID]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("sha256:"),
-                    "{name}"
-                );
-            }
-            None => {
-                assert!(invocation.get("knowledge_dir").is_none(), "{name}");
-                assert!(manifest["config"].get("knowledge").is_none(), "{name}");
-            }
+            Some(dir) => assert_eq!(invocation["knowledge_dir"], dir.display().to_string()),
+            None => assert!(invocation.get("knowledge_dir").is_none(), "{name}"),
         }
+        let hash = manifest["config"]["knowledge"][DB_ID].as_str().unwrap();
+        assert!(hash.starts_with("sha256:"), "{name}");
+        hashes.push(hash.to_string());
     }
+    // Each arm sends different knowledge, evidence included.
+    hashes.sort();
+    hashes.dedup();
+    assert_eq!(hashes.len(), 4);
+}
+
+#[tokio::test]
+async fn an_official_run_refuses_to_resume_once_the_official_description_changes() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let engine = |replies: Vec<String>| {
+        Engine::new(
+            ScriptedLlm::new(replies),
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+    };
+    let run_dir = tempfile::tempdir().unwrap();
+    let first = engine(vec![reply("animals", r#"[{"$count": "n"}]"#)]);
+    let samples = first.dataset().samples()[..1].to_vec();
+    bench::run(
+        &first,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    let description = data
+        .path()
+        .join("databases/dev/pets/collections_description/animals.jsonl");
+    let text = fs::read_to_string(&description).unwrap();
+    fs::write(&description, text.replace("Pet name", "Name of the pet")).unwrap();
+    let err = bench::run(
+        &engine(Vec::new()),
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(err, bench::BenchError::ConfigMismatch { .. }),
+        "{err}"
+    );
 }
 
 #[tokio::test]

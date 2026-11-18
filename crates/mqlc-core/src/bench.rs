@@ -156,8 +156,9 @@ pub struct RunConfig {
     #[serde(flatten)]
     pub settings: Settings,
     pub prompt_hash: String,
-    /// Hash of the arm's knowledge (the auto MDL) per database, when the
-    /// dataset does not fix it. A rerun may add databases but not change one.
+    /// Hash of the arm's knowledge per database. A rerun may add databases
+    /// but not change one. Absent from runs of the official description
+    /// started before #10, which a rerun fills in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub knowledge: BTreeMap<String, String>,
 }

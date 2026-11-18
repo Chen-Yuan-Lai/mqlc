@@ -284,20 +284,44 @@ impl<L: LlmClient> Engine<L> {
     }
 
     /// A hash per database of the knowledge the arm sends for it, recorded in
-    /// run manifests so a run does not resume on different knowledge. Empty
-    /// for the official description (either layout), which the dataset
-    /// revision fixes.
+    /// run manifests so a run does not resume on different knowledge: the
+    /// schema knowledge as sent, plus each question's evidence for the
+    /// evidence arm.
     pub fn knowledge_hashes<'a>(
         &self,
         db_ids: impl IntoIterator<Item = &'a str>,
     ) -> Result<BTreeMap<String, String>, AskError> {
-        if self.arm.mdl_dir().is_none() {
-            return Ok(BTreeMap::new());
-        }
         db_ids
             .into_iter()
-            .map(|db_id| Ok((db_id.to_string(), sha256(self.mdl(db_id)?.as_bytes()))))
+            .map(|db_id| {
+                let split = self.dataset.split_of(db_id).unwrap_or_default();
+                let mut knowledge = self.schema(split, db_id)?;
+                if let Arm::OfficialEvidence = self.arm {
+                    for sample in self.dataset.samples().iter().filter(|s| s.db_id == db_id) {
+                        knowledge.push_str(&format!(
+                            "\n\n{}\n{}",
+                            sample.sample_id, sample.mongodb_evidence
+                        ));
+                    }
+                }
+                Ok((db_id.to_string(), sha256(knowledge.as_bytes())))
+            })
             .collect()
+    }
+
+    /// The schema knowledge the arm sends for every question on `db_id`.
+    fn schema(&self, split: &str, db_id: &str) -> Result<String, AskError> {
+        Ok(match &self.arm {
+            Arm::Official | Arm::OfficialEvidence => {
+                self.dataset.schema_description(split, db_id)?
+            }
+            Arm::OfficialPromptKeys => self.dataset.prompt_keys_schema_description(split, db_id)?,
+            Arm::OfficialTagged => self.dataset.tagged_schema_description(split, db_id)?,
+            Arm::AutoMdl { .. }
+            | Arm::OfficialAutoMdl { .. }
+            | Arm::HumanMdl { .. }
+            | Arm::OfficialHumanMdl { .. } => self.mdl(db_id)?,
+        })
     }
 
     /// The MDL of `db_id`, rendered for the prompt as the arm sends it.
@@ -332,21 +356,7 @@ impl<L: LlmClient> Engine<L> {
     /// The LLM request that `ask` sends for `sample`.
     pub fn request(&self, sample: &Sample) -> Result<LlmRequest, AskError> {
         let prompt = self.dataset.prompt();
-        let schema = match &self.arm {
-            Arm::Official | Arm::OfficialEvidence => self
-                .dataset
-                .schema_description(&sample.split, &sample.db_id)?,
-            Arm::OfficialPromptKeys => self
-                .dataset
-                .prompt_keys_schema_description(&sample.split, &sample.db_id)?,
-            Arm::OfficialTagged => self
-                .dataset
-                .tagged_schema_description(&sample.split, &sample.db_id)?,
-            Arm::AutoMdl { .. }
-            | Arm::OfficialAutoMdl { .. }
-            | Arm::HumanMdl { .. }
-            | Arm::OfficialHumanMdl { .. } => self.mdl(&sample.db_id)?,
-        };
+        let schema = self.schema(&sample.split, &sample.db_id)?;
         let evidence = match self.arm {
             // Sent as written: 48 evidences start or end with whitespace.
             Arm::OfficialEvidence => {

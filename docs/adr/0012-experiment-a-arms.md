@@ -8,4 +8,4 @@
 
 **人工 MDL 只能用在 train 資料庫，而且是另外兩個 arm。** `human-mdl` 與 `official-human-mdl` 讀 `--human-mdl-dir`（預設 `mdl/human`），版面與 `auto-mdl`、`official-auto-mdl` 相同；只要題目的資料庫不在 train split，engine 就以 `AskError::Leakage` 拒絕，什麼都不送。依 ADR 0011 這是設定錯誤：`bench` 在寫 manifest 之前就停下、不留紀錄。這把 ADR 0006 的防洩漏規則變成機械檢查：train 與 dev 的資料庫不重疊，所以 dev 資料庫的人工 MDL 不可能「只根據 train 撰寫」；parent spec 也說人工 MDL 不進實驗 A，只用來在 train 上找 profiler 的缺口。檢查認的是 arm 而不是目錄內容：把人工 MDL 放進 `--mdl-dir` 以 `auto-mdl` 跑，檢查擋不住，manifest 的 `knowledge_dir` 會留下它。
 
-Manifest 記錄每組用了哪份知識：`config.arm` 是 arm 名稱，`config.knowledge` 是每個資料庫實際送出的 MDL 文字（合併 arm 是合併後的文字）的 hash，每次 invocation 的 `knowledge_dir` 是 MDL 讀自哪個目錄。官方說明與 evidence 由資料集版本固定，不記 hash。
+Manifest 記錄每組用了哪份知識：`config.arm` 是 arm 名稱，`config.knowledge` 是每個資料庫實際送出的 schema 知識的 hash（官方說明的 arm 是 render 後的官方說明，MDL arm 是 render 後的 MDL，合併 arm 是合併後的文字；`official-evidence` 再加上該資料庫每題的 `sample_id` 與 evidence），每次 invocation 的 `knowledge_dir` 是 MDL 讀自哪個目錄。資料集版本由 `scripts/fetch-data.sh` 鎖定，但 manifest 不記版本，所以官方說明與 evidence 也要記 hash，資料目錄換了版本或被改過時才會拒絕續跑。#10 之前的官方說明 run 沒有這個欄位，續跑時會補上（續跑本來就允許新增資料庫的 hash）。

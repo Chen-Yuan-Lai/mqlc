@@ -292,7 +292,10 @@ written on train (ADR 0006), so these arms refuse any question on a dev
 database before sending anything. Every MDL file is read strictly: a key
 mqlc would not send, such as a misspelt one, is an error rather than
 silently left out. Each manifest invocation records the MDL directory
-(`knowledge_dir`) next to the per-database hashes.
+(`knowledge_dir`). Every arm's manifest also has a per-database hash of the
+knowledge it sent (the official description, the MDL, the merged text, and
+for `official-evidence` each question's evidence too), so a run refuses to
+resume once its dataset or MDL has changed.
 
 ### IR coverage
 
