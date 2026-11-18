@@ -1,0 +1,624 @@
+{
+  "catalog": "mqlc",
+  "schema": "cs_semester",
+  "models": [
+    {
+      "name": "courses",
+      "tableReference": {
+        "table": "courses"
+      },
+      "columns": [
+        {
+          "name": "_id",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "13",
+            "mqlc.enum": "[\"1\",\"10\",\"11\",\"12\",\"13\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]",
+            "mqlc.path": "_id",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "String:13",
+            "description": "Course id; students.courseRegistrations.courseId refers to it."
+          }
+        },
+        {
+          "name": "name",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "13",
+            "mqlc.enum": "[\"Machine Learning Theory\",\"Data Structure and Algorithms\",\"Advanced Database Systems\",\"Applied Deep Learning \",\"Statistical learning\",\"Intro to Database 1\",\"Intro to Database 2\",\"Natural Language Processing\",\"Intro to BlockChain\",\"Computer Network\",\"Computer Vision\",\"Advanced Operating System\",\"C for Programmers\"]",
+            "mqlc.path": "name",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "String:13",
+            "description": "Course name, exactly as stored: 'Applied Deep Learning ' ends with a space."
+          }
+        },
+        {
+          "name": "credit",
+          "type": "Int32",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "2",
+            "mqlc.enum": "[3,2]",
+            "mqlc.path": "credit",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "Int32:13",
+            "description": "Credits of the course; higher means more important."
+          }
+        },
+        {
+          "name": "difficulty",
+          "type": "Int32",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "5",
+            "mqlc.enum": "[3,4,1,2,5]",
+            "mqlc.path": "difficulty",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "Int32:13",
+            "description": "1 (easiest) to 5 (hardest)."
+          }
+        },
+        {
+          "name": "statistics",
+          "type": "Document",
+          "notNull": true,
+          "properties": {
+            "mqlc.embedded": "true",
+            "mqlc.path": "statistics",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "Document:13",
+            "description": "Precomputed from the courseRegistrations of this course in students."
+          }
+        },
+        {
+          "name": "statistics.totalEnrollments",
+          "type": "Int32",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "8",
+            "mqlc.enum": "[7,8,10,9,12,5,6,3]",
+            "mqlc.path": "statistics.totalEnrollments",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "Int32:13",
+            "description": "Number of students registered for the course."
+          }
+        },
+        {
+          "name": "statistics.averageGrade",
+          "type": "Double",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "10",
+            "mqlc.enum": "[3.0,2.62,2.67,2.6,2.58,3.6,2.17,3.33,2.57,3.3]",
+            "mqlc.path": "statistics.averageGrade",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "Double:13",
+            "description": "Mean grade points over all registrations of the course (A=4, B=3, C=2, D=1, a failed course with grade null counts as 0), rounded to 2 decimals."
+          }
+        },
+        {
+          "name": "statistics.averageSatisfaction",
+          "type": "Double",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "8",
+            "mqlc.enum": "[3.0,3.71,3.5,3.1,3.33,2.67,3.89,3.6]",
+            "mqlc.path": "statistics.averageSatisfaction",
+            "mqlc.presence": "13/13",
+            "mqlc.types": "Double:13",
+            "description": "Mean courseRegistrations.satisfaction over all registrations of the course, rounded to 2 decimals."
+          }
+        }
+      ],
+      "properties": {
+        "mqlc.documents": 13,
+        "mqlc.sampled": 13,
+        "description": "One document per course offered this semester."
+      }
+    },
+    {
+      "name": "professors",
+      "tableReference": {
+        "table": "professors"
+      },
+      "columns": [
+        {
+          "name": "_id",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "10",
+            "mqlc.enum": "[\"1\",\"10\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]",
+            "mqlc.path": "_id",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "String:10",
+            "description": "Professor id; students.raPositions.profId refers to it."
+          }
+        },
+        {
+          "name": "personalInfo",
+          "type": "Document",
+          "notNull": true,
+          "properties": {
+            "mqlc.embedded": "true",
+            "mqlc.path": "personalInfo",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "Document:10"
+          }
+        },
+        {
+          "name": "personalInfo.firstName",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "10",
+            "mqlc.enum": "[\"Nathaniel\",\"Hattie\",\"Zhihua\",\"Ogdon\",\"Merwyn\",\"Bernhard\",\"Sauveur\",\"Millie\",\"Rosamond\",\"Mateo\"]",
+            "mqlc.path": "personalInfo.firstName",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "String:10"
+          }
+        },
+        {
+          "name": "personalInfo.lastName",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "10",
+            "mqlc.enum": "[\"Pigford\",\"Smythin\",\"Zhou\",\"Zywicki\",\"Conkay\",\"Molen\",\"Skyme\",\"Cunningham\",\"Ewenson\",\"Medmore\"]",
+            "mqlc.path": "personalInfo.lastName",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "String:10"
+          }
+        },
+        {
+          "name": "personalInfo.email",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "10",
+            "mqlc.enum": "[\"npigford0@hku.hk\",\"hsmythin9@hku.hk\",\"zzhihua@hku.hk\",\"ozywicki2@hku.hk\",\"mconkay3@ucla.edu\",\"bmolen4@hku.hk\",\"sskyme5@columbia.edu\",\"mcunningham6@stanford.edu\",\"rewenson7@hku.hk\",\"mmedmore8@hku.hk\"]",
+            "mqlc.path": "personalInfo.email",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "String:10"
+          }
+        },
+        {
+          "name": "personalInfo.gender",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "2",
+            "mqlc.enum": "[\"Male\",\"Female\"]",
+            "mqlc.path": "personalInfo.gender",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "String:10",
+            "description": "'Male' or 'Female'."
+          }
+        },
+        {
+          "name": "metrics",
+          "type": "Document",
+          "notNull": true,
+          "properties": {
+            "mqlc.embedded": "true",
+            "mqlc.path": "metrics",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "Document:10"
+          }
+        },
+        {
+          "name": "metrics.popularity",
+          "type": "Int32",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "2",
+            "mqlc.enum": "[3,2]",
+            "mqlc.path": "metrics.popularity",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "Int32:10",
+            "description": "Popularity of the professor; higher means more popular."
+          }
+        },
+        {
+          "name": "metrics.teachingAbility",
+          "type": "Int32",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "5",
+            "mqlc.enum": "[5,1,2,3,4]",
+            "mqlc.path": "metrics.teachingAbility",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "Int32:10",
+            "description": "1 to 5; higher means better teaching."
+          }
+        },
+        {
+          "name": "background",
+          "type": "Document",
+          "notNull": true,
+          "properties": {
+            "mqlc.embedded": "true",
+            "mqlc.path": "background",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "Document:10"
+          }
+        },
+        {
+          "name": "background.graduatedFrom",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "10",
+            "mqlc.enum": "[\"University of Washington\",\"Mount Aloysius College\",\"Beijing Polytechnic University\",\"University of Boston\",\"Carnegie Mellon University\",\"Princeton University\",\"University of Pennsylvania\",\"Massachusetts Institute of Technology\",\"Miyazaki Municipal University\",\"ETH Zurich\"]",
+            "mqlc.path": "background.graduatedFrom",
+            "mqlc.presence": "10/10",
+            "mqlc.types": "String:10",
+            "description": "The university the professor graduated from."
+          }
+        },
+        {
+          "name": "fullName",
+          "type": "String",
+          "notNull": false,
+          "isCalculated": true,
+          "expression": "{\"$concat\": [\"$personalInfo.firstName\", \" \", \"$personalInfo.lastName\"]}",
+          "properties": {
+            "description": "The professor's full name, 'firstName lastName'."
+          }
+        }
+      ],
+      "properties": {
+        "mqlc.documents": 10,
+        "mqlc.sampled": 10,
+        "description": "One document per professor."
+      }
+    },
+    {
+      "name": "students",
+      "tableReference": {
+        "table": "students"
+      },
+      "columns": [
+        {
+          "name": "_id",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "38",
+            "mqlc.format": "\\d+",
+            "mqlc.path": "_id",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "String:38"
+          }
+        },
+        {
+          "name": "personalInfo",
+          "type": "Document",
+          "notNull": true,
+          "properties": {
+            "mqlc.embedded": "true",
+            "mqlc.path": "personalInfo",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "Document:38"
+          }
+        },
+        {
+          "name": "personalInfo.firstName",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "38",
+            "mqlc.format": "[A-Z]+[a-z]+",
+            "mqlc.path": "personalInfo.firstName",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "String:38"
+          }
+        },
+        {
+          "name": "personalInfo.lastName",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "37",
+            "mqlc.format": "[A-Z]+[a-z]+",
+            "mqlc.path": "personalInfo.lastName",
+            "mqlc.presence": "38/38",
+            "mqlc.topValues": "[[\"Mallinar\",2]]",
+            "mqlc.types": "String:38"
+          }
+        },
+        {
+          "name": "personalInfo.phoneNumber",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "38",
+            "mqlc.format": "\\(\\d{3}\\) \\d{7}",
+            "mqlc.path": "personalInfo.phoneNumber",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "String:38"
+          }
+        },
+        {
+          "name": "personalInfo.email",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "38",
+            "mqlc.path": "personalInfo.email",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "String:38"
+          }
+        },
+        {
+          "name": "academic",
+          "type": "Document",
+          "notNull": true,
+          "properties": {
+            "mqlc.embedded": "true",
+            "mqlc.path": "academic",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "Document:38"
+          }
+        },
+        {
+          "name": "academic.intelligence",
+          "type": "Int32",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "5",
+            "mqlc.enum": "[5,2,3,1,4]",
+            "mqlc.path": "academic.intelligence",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "Int32:38",
+            "description": "1 to 5; higher means more intelligent."
+          }
+        },
+        {
+          "name": "academic.gpa",
+          "type": "Double",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "16",
+            "mqlc.enum": "[3.2,2.4,3.7,3.5,3.4,2.8,3.8,2.3,3.1,2.7,2.9,2.0,2.6,2.1,3.0,3.9]",
+            "mqlc.path": "academic.gpa",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "Double:38",
+            "description": "The student's GPA as stored; it is not computed from courseRegistrations (see semesterGpa)."
+          }
+        },
+        {
+          "name": "academic.type",
+          "type": "String",
+          "notNull": true,
+          "properties": {
+            "mqlc.distinct": "3",
+            "mqlc.enum": "[\"TPG\",\"UG\",\"RPG\"]",
+            "mqlc.path": "academic.type",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "String:38",
+            "description": "Degree programme: UG is an undergraduate (bachelor's) student; TPG (taught) and RPG (research) are both postgraduate master's students."
+          }
+        },
+        {
+          "name": "raPositions",
+          "type": "Array",
+          "notNull": true,
+          "properties": {
+            "mqlc.array": "true",
+            "mqlc.elementTypes": "Document",
+            "mqlc.embedded": "true",
+            "mqlc.path": "raPositions",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "Array:38",
+            "description": "The student's RA positions; an empty array for students who are no RA (17 of 38)."
+          }
+        },
+        {
+          "name": "raPositions.profId",
+          "type": "String",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "13",
+            "mqlc.enum": "[\"11\",\"5\",\"3\",\"9\",\"2\",\"6\",\"10\",\"4\",\"7\",\"8\",\"13\",\"1\",\"12\"]",
+            "mqlc.inArray": "raPositions",
+            "mqlc.path": "raPositions.profId",
+            "mqlc.presence": "35/35",
+            "mqlc.types": "String:35",
+            "description": "_id of the professor advising this RA position; 11, 12 and 13 match no professor document (their profName is 'Unknown')."
+          }
+        },
+        {
+          "name": "raPositions.profName",
+          "type": "String",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "11",
+            "mqlc.enum": "[\"Unknown\",\"Bernhard Molen\",\"Ogdon Zywicki\",\"Mateo Medmore\",\"Zhihua Zhou\",\"Sauveur Skyme\",\"Hattie Smythin\",\"Merwyn Conkay\",\"Millie Cunningham\",\"Rosamond Ewenson\",\"Nathaniel Pigford\"]",
+            "mqlc.inArray": "raPositions",
+            "mqlc.path": "raPositions.profName",
+            "mqlc.presence": "35/35",
+            "mqlc.types": "String:35",
+            "description": "The advising professor's full name, 'firstName lastName', copied from professors; 'Unknown' when profId matches no professor."
+          }
+        },
+        {
+          "name": "raPositions.capability",
+          "type": "Int32",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "4",
+            "mqlc.enum": "[3,5,2,4]",
+            "mqlc.inArray": "raPositions",
+            "mqlc.path": "raPositions.capability",
+            "mqlc.presence": "35/35",
+            "mqlc.types": "Int32:35",
+            "description": "The student's research capability as rated by the professor; higher means more capable."
+          }
+        },
+        {
+          "name": "raPositions.salary",
+          "type": "String",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "4",
+            "mqlc.enum": "[\"high\",\"med\",\"low\",\"free\"]",
+            "mqlc.inArray": "raPositions",
+            "mqlc.path": "raPositions.salary",
+            "mqlc.presence": "35/35",
+            "mqlc.types": "String:35",
+            "description": "high, med (average), low, or free (unpaid)."
+          }
+        },
+        {
+          "name": "courseRegistrations",
+          "type": "Array",
+          "notNull": true,
+          "properties": {
+            "mqlc.array": "true",
+            "mqlc.elementTypes": "Document",
+            "mqlc.embedded": "true",
+            "mqlc.path": "courseRegistrations",
+            "mqlc.presence": "38/38",
+            "mqlc.types": "Array:38",
+            "description": "Courses the student registered for; an empty array for 2 students."
+          }
+        },
+        {
+          "name": "courseRegistrations.courseId",
+          "type": "String",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "13",
+            "mqlc.enum": "[\"12\",\"8\",\"11\",\"6\",\"13\",\"9\",\"10\",\"4\",\"1\",\"7\",\"3\",\"2\",\"5\"]",
+            "mqlc.inArray": "courseRegistrations",
+            "mqlc.path": "courseRegistrations.courseId",
+            "mqlc.presence": "101/101",
+            "mqlc.types": "String:101",
+            "description": "_id of the registered course."
+          }
+        },
+        {
+          "name": "courseRegistrations.courseName",
+          "type": "String",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "13",
+            "mqlc.enum": "[\"Applied Deep Learning \",\"Advanced Operating System\",\"Advanced Database Systems\",\"Computer Network\",\"Statistical learning\",\"C for Programmers\",\"Data Structure and Algorithms\",\"Natural Language Processing\",\"Machine Learning Theory\",\"Computer Vision\",\"Intro to Database 2\",\"Intro to Database 1\",\"Intro to BlockChain\"]",
+            "mqlc.inArray": "courseRegistrations",
+            "mqlc.path": "courseRegistrations.courseName",
+            "mqlc.presence": "101/101",
+            "mqlc.types": "String:101",
+            "description": "Copy of the course's name."
+          }
+        },
+        {
+          "name": "courseRegistrations.courseCredit",
+          "type": "Int32",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "2",
+            "mqlc.enum": "[3,2]",
+            "mqlc.inArray": "courseRegistrations",
+            "mqlc.path": "courseRegistrations.courseCredit",
+            "mqlc.presence": "101/101",
+            "mqlc.types": "Int32:101",
+            "description": "Copy of the course's credit."
+          }
+        },
+        {
+          "name": "courseRegistrations.grade",
+          "type": "String | Null",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "4",
+            "mqlc.enum": "[\"A\",\"B\",\"C\",\"D\"]",
+            "mqlc.inArray": "courseRegistrations",
+            "mqlc.path": "courseRegistrations.grade",
+            "mqlc.presence": "101/101",
+            "mqlc.types": "String:96,Null:5",
+            "description": "A (excellent, 4 grade points), B (good, 3), C (fair, 2), D (poor pass, 1); null means the student failed the course."
+          }
+        },
+        {
+          "name": "courseRegistrations.satisfaction",
+          "type": "Int32",
+          "notNull": false,
+          "properties": {
+            "mqlc.distinct": "5",
+            "mqlc.enum": "[5,4,2,1,3]",
+            "mqlc.inArray": "courseRegistrations",
+            "mqlc.path": "courseRegistrations.satisfaction",
+            "mqlc.presence": "101/101",
+            "mqlc.types": "Int32:101",
+            "description": "The student's satisfaction with the course, 1 to 5; higher means more satisfied."
+          }
+        },
+        {
+          "name": "fullName",
+          "type": "String",
+          "notNull": false,
+          "isCalculated": true,
+          "expression": "{\"$concat\": [\"$personalInfo.firstName\", \" \", \"$personalInfo.lastName\"]}",
+          "properties": {
+            "description": "The student's full name, 'firstName lastName'."
+          }
+        },
+        {
+          "name": "semesterGpa",
+          "type": "Double",
+          "notNull": false,
+          "isCalculated": true,
+          "expression": "{\"$let\": {\"vars\": {\"credits\": {\"$sum\": \"$courseRegistrations.courseCredit\"}}, \"in\": {\"$cond\": [{\"$eq\": [\"$$credits\", 0]}, null, {\"$divide\": [{\"$sum\": {\"$map\": {\"input\": \"$courseRegistrations\", \"as\": \"r\", \"in\": {\"$multiply\": [\"$$r.courseCredit\", {\"$switch\": {\"branches\": [{\"case\": {\"$eq\": [\"$$r.grade\", \"A\"]}, \"then\": 4}, {\"case\": {\"$eq\": [\"$$r.grade\", \"B\"]}, \"then\": 3}, {\"case\": {\"$eq\": [\"$$r.grade\", \"C\"]}, \"then\": 2}, {\"case\": {\"$eq\": [\"$$r.grade\", \"D\"]}, \"then\": 1}], \"default\": 0}}]}}}}, \"$$credits\"]}]}}}",
+          "properties": {
+            "description": "The student's GPA this semester: sum of courseCredit x grade points over courseRegistrations divided by the sum of courseCredit; null without registrations."
+          }
+        },
+        {
+          "name": "courseRegistrations.gradePoints",
+          "type": "Int32",
+          "notNull": false,
+          "isCalculated": true,
+          "expression": "{\"$switch\": {\"branches\": [{\"case\": {\"$eq\": [\"$courseRegistrations.grade\", \"A\"]}, \"then\": 4}, {\"case\": {\"$eq\": [\"$courseRegistrations.grade\", \"B\"]}, \"then\": 3}, {\"case\": {\"$eq\": [\"$courseRegistrations.grade\", \"C\"]}, \"then\": 2}, {\"case\": {\"$eq\": [\"$courseRegistrations.grade\", \"D\"]}, \"then\": 1}], \"default\": 0}}",
+          "properties": {
+            "description": "Grade points of one registration, after $unwind of courseRegistrations: A=4, B=3, C=2, D=1, failed (null) 0."
+          }
+        }
+      ],
+      "properties": {
+        "mqlc.documents": 38,
+        "mqlc.sampled": 38,
+        "description": "One document per student, with the student's course registrations and research assistant (RA) positions of this semester embedded as arrays."
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "name": "students.courseRegistrations.courseId",
+      "models": [
+        "students",
+        "courses"
+      ],
+      "joinType": "MANY_TO_MANY",
+      "condition": "students.courseRegistrations.courseId = courses._id",
+      "properties": {
+        "mqlc.matched": "13/13",
+        "mqlc.path": "courseRegistrations.courseId"
+      }
+    },
+    {
+      "name": "students.raPositions.profId",
+      "models": [
+        "students",
+        "professors"
+      ],
+      "joinType": "MANY_TO_MANY",
+      "condition": "students.raPositions.profId = professors._id",
+      "properties": {
+        "mqlc.path": "raPositions.profId"
+      }
+    }
+  ]
+}

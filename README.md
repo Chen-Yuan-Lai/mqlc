@@ -289,7 +289,9 @@ an auto MDL a person added business definitions (`properties.description` on
 a model or column), formulas (a column with `"isCalculated": true` and an
 aggregation `expression`) and instructions to. A human MDL may only be
 written on train (ADR 0006), so these arms refuse any question on a dev
-database before sending anything. Every MDL file is read strictly: a key
+database before sending anything. `mdl/human/cs_semester` is one, written from the
+official description and queries on the data only, without reading any of
+the database's questions, evidence or gold pipelines. Every MDL file is read strictly: a key
 mqlc would not send, such as a misspelt one, is an error rather than
 silently left out. Each manifest invocation records the MDL directory
 (`knowledge_dir`). Every arm's manifest also has a per-database hash of the

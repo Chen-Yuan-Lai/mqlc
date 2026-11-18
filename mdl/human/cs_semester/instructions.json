@@ -1,0 +1,29 @@
+[
+  {
+    "instruction": "field_name is the field's MongoDB dot-notation path. A field with in_array lies inside the elements of that array: it matches element-wise, and $unwind of the array turns each element into a row."
+  },
+  {
+    "instruction": "data_type lists the BSON types seen, most frequent first; Array<...> gives the types of the array's elements. present is the share of enclosing documents (or array elements) that have the field; a field without it was always present."
+  },
+  {
+    "instruction": "references names the collection _id a field's values refer to, for $lookup; such a field's values are not listed."
+  },
+  {
+    "instruction": "values lists every value a field takes (array elements for an array), most frequent first. A field with more values has common_values instead, up to 5 of its most frequent that repeat, with min and max for numbers and dates, and a format: a regex at least 90% of its strings match in full."
+  },
+  {
+    "instruction": "Types, presence and values come from up to the first 100000 documents of each collection in _id order; other documents may differ."
+  },
+  {
+    "instruction": "computed_as gives the aggregation expression of a field that is not stored: use the expression (for example in $project or $addFields), not the field name, in a pipeline."
+  },
+  {
+    "instruction": "Grade points are A=4, B=3, C=2, D=1, and 0 for a failed course (grade null)."
+  },
+  {
+    "instruction": "A course's registrations live in students.courseRegistrations: $unwind it to count, filter or average registrations per course or per student. courses.statistics already holds each course's enrollment count, average grade and average satisfaction."
+  },
+  {
+    "instruction": "A student's or professor's full name is firstName and lastName joined by a space."
+  }
+]
