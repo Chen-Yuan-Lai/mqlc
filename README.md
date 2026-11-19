@@ -216,7 +216,19 @@ results with the official `eval_script.py`, writing `scores.jsonl` and
 - **Exec-Rate**: predictions that parsed and executed without error
 
 `summary.json` has the three shares overall, per split (`by_split`; dev is
-the reported score, ADR 0006) and per database (`by_db`).
+the reported score, ADR 0006) and per database (`by_db`), and the run's
+`cost_usd`.
+
+To compare two scored runs, such as two arms on the same questions:
+
+```bash
+uv run --project scoring scoring/compare.py runs/<a> runs/<b>
+```
+
+It pairs the questions both runs answered, leaving out any that either run
+skipped. For each metric it prints both shares, the number of questions only
+A or only B got right, and the exact McNemar p-value over those
+disagreements. It also prints the cost of the paired questions.
 
 ### Auto MDL
 

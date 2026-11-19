@@ -12,7 +12,8 @@ Records skipped for a context overflow (the prompt was never sent) are neither
 right nor wrong: they are left out of all three shares and counted apart.
 
 Writes `scores.jsonl` (one line per record) and `summary.json` (overall, by
-split and by database) into the run directory, and prints the summary.
+split and by database, plus what the run cost) into the run directory, and
+prints the summary. `compare.py` compares two scored runs question by question.
 
     uv run --project scoring scoring/score.py runs/<name>
 """
@@ -104,8 +105,8 @@ def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
     ev = load_eval_script(data_dir)
     samples = {s["sample_id"]: s
                for s in read_jsonl(data_dir / "aptmqlbench_data.jsonl", json_util.loads)}
-    scores = [score_record(ev, mongo_uri, r, samples[r["sample_id"]])
-              for r in unique_records(read_jsonl(run_dir / "results.jsonl"))]
+    records = unique_records(read_jsonl(run_dir / "results.jsonl"))
+    scores = [score_record(ev, mongo_uri, r, samples[r["sample_id"]]) for r in records]
 
     with (run_dir / "scores.jsonl").open("w") as f:
         for s in scores:
@@ -115,6 +116,7 @@ def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
         by_split[samples[s["sample_id"]]["split"]].append(s)
         by_db[s["db_id"]].append(s)
     summary = percentages(scores) | {
+        "cost_usd": sum(r.get("cost_usd") or 0 for r in records),
         "by_split": {split: percentages(rows) for split, rows in sorted(by_split.items())},
         "by_db": {db: percentages(rows) for db, rows in sorted(by_db.items())},
     }
@@ -137,6 +139,7 @@ def main() -> None:
     for db, s in rows:
         print(f"{db:<26}{s['samples']:>5}{s[SKIPPED]:>9}{s['exec_rate']:>10.2f}%"
               f"{s['soft_ex']:>8.2f}%{s['strict_ex']:>10.2f}%")
+    print(f"cost ${summary['cost_usd']:.4f}")
 
 
 if __name__ == "__main__":

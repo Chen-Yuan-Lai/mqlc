@@ -26,13 +26,13 @@ def gold(sample_id, pipeline):
     }
 
 
-def record(sample_id, pipeline=None, error=None):
+def record(sample_id, pipeline=None, error=None, cost_usd=None):
     return {
         "arm": "official", "model": "scripted", "sample_id": sample_id, "candidate": 0,
         "db_id": "pets", "collection": "animals" if pipeline else None,
         "pipeline": pipeline, "row_count": None, "error": error,
         "usage": {"input_tokens": 0, "output_tokens": 0}, "latency_ms": 0,
-        "cost_usd": None, "reply": "",
+        "cost_usd": cost_usd, "reply": "",
     }
 
 
@@ -79,9 +79,10 @@ def test_scores_a_run_with_official_soft_ex_strict_ex_and_exec_rate(
         record("dev_1", [
             {"$match": {"born": {"$gte": {"$date": {"$numberLong": "1546300800000"}}}}},
             {"$count": "cats"},
-        ]),
+        ], cost_usd=0.25),
         # Right names plus an extra field: Soft-EX only.
-        record("dev_2", [{"$match": {"species": "cat"}}, {"$project": {"_id": 0, "name": 1, "age": 1}}]),
+        record("dev_2", [{"$match": {"species": "cat"}}, {"$project": {"_id": 0, "name": 1, "age": 1}}],
+               cost_usd=0.5),
         record("dev_3", error={"kind": "parse", "message": "no pipeline"}),
         # Never sent, so neither right nor wrong: left out of every share.
         record("dev_4", error={"kind": "skipped_context_overflow", "message": "too long"}),
@@ -96,6 +97,8 @@ def test_scores_a_run_with_official_soft_ex_strict_ex_and_exec_rate(
     assert summary["exec_rate"] == pytest.approx(75)
     assert summary["soft_ex"] == pytest.approx(75)
     assert summary["strict_ex"] == pytest.approx(50)
+    # What the run cost; records without a cost (here the skipped one) add nothing.
+    assert summary["cost_usd"] == pytest.approx(0.75)
     # The dev split is the reported score (ADR 0006), so it stands apart.
     dev, train = summary["by_split"]["dev"], summary["by_split"]["train"]
     assert (dev["samples"], dev["skipped_context_overflow"]) == (3, 1)
