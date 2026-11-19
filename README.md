@@ -63,6 +63,31 @@ at f8e38ab (its manifest says `-dirty` for an edit outside the code); the
 train runs need the options added with them. The reproduction cost USD 9.34
 (#5) and the investigation USD 16.89 (#19).
 
+### Experiment A scores
+
+Where the schema knowledge comes from ([arms](#experiment-a), ADR 0012),
+on dev, each arm against the official one on the same model (paired
+difference in Soft-EX, exact McNemar p over the questions only one got
+right). Temperature 0, no thinking, batch; the auto MDL is the profile at
+c094437 (#11).
+
+| Model | `--arm` | Exec-Rate | Soft-EX | vs official | p | Strict-EX | Cost (USD) |
+|---|---|--:|--:|--:|--:|--:|--:|
+| Haiku 4.5 | [official](runs/baseline-all/manifest.json) (the baseline's dev half) | 97.75 | 44.80 | | | 18.68 | 1.37 |
+| Haiku 4.5 | [auto-mdl](runs/expA-dev-auto-mdl/manifest.json) | 97.68 | 47.54 | +2.74 | 0.018 | 20.65 | 1.69 |
+| Haiku 4.5 | [official-auto-mdl](runs/expA-dev-official-auto-mdl/manifest.json) | 97.61 | **49.65** | +4.85 | <0.001 | 20.29 | 1.69 |
+| Haiku 4.5 | [official-evidence](runs/expA-dev-official-evidence/manifest.json) (upper bound) | 97.47 | 61.24 | +16.44 | <0.001 | 25.91 | 1.37 |
+| Sonnet 4.5 | [official](runs/sonnet-dev-official/manifest.json) | 98.53 | 50.07 | | | 27.39 | 3.91 |
+| Sonnet 4.5 | [official-auto-mdl](runs/sonnet-dev-official-auto-mdl/manifest.json) | 99.30 | **54.56** | +4.49 | <0.001 | 31.46 | 4.80 |
+
+The auto MDL in place of the official description is no worse (+2.74), and
+merged into it gains clearly (+4.85), more than in place of it (+2.11,
+p = 0.022). The gain is uneven across databases: merged, it gains 24 points
+on debit_card_specializing and 16 on student_club but loses 7 on formula_1.
+Evidence, written by hand for each question, is still 11.6 points above it.
+Sonnet 4.5 gains about as much from the merged auto MDL as Haiku. The new
+runs cost USD 13.46 (#11).
+
 ## Setup
 
 Requirements: Rust (stable), Docker Engine with the compose plugin, and
