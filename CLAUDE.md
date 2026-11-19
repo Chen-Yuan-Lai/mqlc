@@ -18,7 +18,7 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/d
 
 A ticket is done when CI is green on the pushed commit and the issue is closed with a completion record:
 
-1. Before committing, run every command in `.github/workflows/ci.yml` locally (Docker must be running for the testcontainers tests). Commit with `Refs #<n>`.
+1. Before every commit, documentation-only included, run `scripts/ci.sh` (what CI runs; Docker must be running). Commit with `Refs #<n>`.
 2. Push, then wait on the run with `gh run watch <run-id> --exit-status`.
 3. Comment the completion record on the issue. It is the only shared record of the work: `runs/` is gitignored and review findings otherwise live only in the session transcript. It covers:
    - what was delivered;

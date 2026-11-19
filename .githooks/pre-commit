@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Enabled by `git config core.hooksPath .githooks`. The full suite is
+# `scripts/ci.sh`; this runs the fast part on every commit.
+exec scripts/ci.sh quick

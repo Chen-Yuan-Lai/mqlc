@@ -321,6 +321,14 @@ The dev gaps are led by `$substr` (16 samples) and `$objectToArray` (14).
 ## Tests
 
 ```bash
+scripts/ci.sh                          # what CI runs: fmt, clippy, cargo test, the scorer test
+git config core.hooksPath .githooks    # once: fmt and clippy on every commit
+```
+
+`scripts/ci.sh rust` and `scripts/ci.sh scoring` run one CI job each; on its
+own, `cargo test` is:
+
+```bash
 cargo test
 ```
 
