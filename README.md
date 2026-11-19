@@ -246,11 +246,14 @@ collection and one column per field path, and `instructions.json`. Field
 types, presence, arrays, embedded documents and the array a field sits in are
 column properties in the `mqlc.` namespace (ADR 0004), so `mdl.json` stays
 valid Wren MDL. So are values: a field with at most 20 distinct values lists
-them all; one with more gets its most common repeated values, min and max for
-numbers and dates, and a regex format most of its strings follow. A field
-whose values are `_id`s of another collection (any ObjectId, or a key named
-for the collection, such as `accountId` for `accounts`) becomes an MDL
-relationship. `--split` and `--db` choose the databases; all 21 take about
+them all, null included; one with more gets its most common repeated values,
+min and max for numbers and dates, and a regex format most of its strings
+follow. Strings with leading or trailing whitespace are counted. A field
+whose values are `_id`s of another collection becomes an MDL relationship:
+a key named for the collection (`accountId` for `accounts`, or its first
+letters, `profId` for `professors`) when more than half of its values are,
+any ObjectId when nine in ten are. The prompt says how many matched when
+not all did. `--split` and `--db` choose the databases; all 21 take about
 a minute, and rerunning overwrites them. On AptMQL-Bench, 100,000 documents
 find every field a full scan finds.
 
@@ -289,9 +292,9 @@ dev:
 
 `official-auto-mdl` keeps each official field line as written and appends
 what the auto MDL says of the same path (`in_array`, `present`,
-`references`, values), with the observed type as `observed_type` where it
-differs from the official `data_type`; fields only the profile saw follow the
-official ones. The 343 questions without `mongodb_evidence` (140 on dev) get
+`references`, values, `untrimmed`), with the observed type as
+`observed_type` where it differs from the official `data_type`; fields only
+the profile saw follow the official ones. The 343 questions without `mongodb_evidence` (140 on dev) get
 the official prompt unchanged under `official-evidence` and are scored like
 the rest, so all four arms answer the same questions.
 

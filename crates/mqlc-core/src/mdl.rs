@@ -250,7 +250,7 @@ impl MdlProject {
     }
 
     /// (model, path) -> the `_id` it refers to.
-    fn references(&self) -> BTreeMap<(&str, &str), String> {
+    fn references(&self) -> BTreeMap<(&str, &str), Reference> {
         self.mdl
             .relationships
             .iter()
@@ -259,7 +259,18 @@ impl MdlProject {
                 let [from, to] = r.models.as_slice() else {
                     return None;
                 };
-                Some(((from.as_str(), path), format!("{to}._id")))
+                // `<matched>/<checked>`, shown only when some did not match.
+                let matched = r
+                    .properties
+                    .get("mqlc.matched")
+                    .and_then(|m| m.as_str())
+                    .filter(|m| m.split_once('/').is_some_and(|(a, b)| a != b))
+                    .map(str::to_string);
+                let reference = Reference {
+                    to: format!("{to}._id"),
+                    matched,
+                };
+                Some(((from.as_str(), path), reference))
             })
             .collect()
     }
@@ -275,6 +286,13 @@ impl MdlProject {
             .collect();
         (!lines.is_empty()).then(|| format!("Instructions:\n{}", lines.join("\n")))
     }
+}
+
+/// The `_id` a field refers to, and how many of its distinct values checked
+/// are `_id`s there when not all are.
+struct Reference {
+    to: String,
+    matched: Option<String>,
 }
 
 /// What `render_with_official` adds to the instructions: the profiler wrote
@@ -297,9 +315,14 @@ fn path(c: &Column) -> &str {
 /// `{"field_name", "data_type", ...}` as key-value pairs, with arrays shown
 /// as `Array<element types>`, a person's `description` and formula
 /// (`computed_as`) if any, presence only when the field is sometimes missing,
-/// the `_id` it refers to (if any, instead of its values), then its values:
-/// all of them, or their format, range and most common ones.
-fn column_line(c: &Column, references: Option<&String>) -> Vec<(&'static str, serde_json::Value)> {
+/// the `_id` it refers to (if any, instead of its values, with how many of
+/// them matched when not all did), then its values: all of them, or their
+/// format, range and most common ones, and how many strings have leading or
+/// trailing whitespace.
+fn column_line(
+    c: &Column,
+    reference: Option<&Reference>,
+) -> Vec<(&'static str, serde_json::Value)> {
     use serde_json::Value;
     let prop = |k: &str| c.properties.get(k).map(String::as_str);
     let parsed = |k: &str| prop(k).and_then(|v| serde_json::from_str::<Value>(v).ok());
@@ -332,8 +355,11 @@ fn column_line(c: &Column, references: Option<&String>) -> Vec<(&'static str, se
         line.push(("present", present.into()));
     }
     // The ids a reference holds say nothing its target does not.
-    if let Some(to) = references {
-        line.push(("references", to.as_str().into()));
+    if let Some(reference) = reference {
+        line.push(("references", reference.to.as_str().into()));
+        if let Some(matched) = &reference.matched {
+            line.push(("references_matched", matched.as_str().into()));
+        }
         return line;
     }
     if let Some(values) = parsed("mqlc.enum") {
@@ -354,6 +380,9 @@ fn column_line(c: &Column, references: Option<&String>) -> Vec<(&'static str, se
             .filter_map(|pair| pair.as_array()?.first().cloned())
             .collect();
         line.push(("common_values", Value::Array(values)));
+    }
+    if let Some(untrimmed) = parsed("mqlc.untrimmed") {
+        line.push(("untrimmed", untrimmed));
     }
     line
 }

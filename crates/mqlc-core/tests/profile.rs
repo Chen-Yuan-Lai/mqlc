@@ -293,7 +293,23 @@ async fn the_mdl_is_valid_wren_mdl_and_reloads_unchanged() {
 
 #[tokio::test]
 async fn low_cardinality_fields_list_their_whole_value_domain() {
-    let mongo = mongo_with_collections([("animals", animals())]).await;
+    // A failed course has no grade: a null among the strings.
+    let registrations = vec![
+        doc! { "_id": 1, "courses": [{ "grade": "A" }, { "grade": Bson::Null }] },
+        doc! { "_id": 2, "courses": [{ "grade": "A" }, { "grade": "B" }] },
+        doc! { "_id": 3, "courses": [{ "grade": Bson::Null }, { "grade": Bson::Null }] },
+    ];
+    // As many values as an enum lists, and a null on top.
+    let mut rooms: Vec<_> = (1..=20)
+        .map(|i| doc! { "_id": i, "room": format!("R{i}") })
+        .collect();
+    rooms.push(doc! { "_id": 21, "room": Bson::Null });
+    let mongo = mongo_with_collections([
+        ("animals", animals()),
+        ("students", registrations),
+        ("classes", rooms),
+    ])
+    .await;
 
     let project = profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
         .await
@@ -321,12 +337,24 @@ async fn low_cardinality_fields_list_their_whole_value_domain() {
         column(&project, "animals", "visits.vet").properties["mqlc.distinct"],
         "3"
     );
-    // Nulls are not values; ObjectIds and dates are never enumerated.
+    // A null is a value of a scalar field, but not one of a field holding
+    // documents, whose documents are not listed; ObjectIds and dates are
+    // never enumerated.
+    assert_eq!(
+        column(&project, "animals", "chip").properties["mqlc.enum"],
+        "[null]"
+    );
     assert!(
-        !column(&project, "animals", "chip")
+        !column(&project, "animals", "owner")
             .properties
             .contains_key("mqlc.enum")
     );
+    let grade = column(&project, "students", "courses.grade");
+    assert_eq!(grade.properties["mqlc.enum"], r#"[null,"A","B"]"#);
+    assert_eq!(grade.properties["mqlc.distinct"], "3");
+    let rooms: Vec<serde_json::Value> =
+        serde_json::from_str(&column(&project, "classes", "room").properties["mqlc.enum"]).unwrap();
+    assert_eq!((rooms.len(), &rooms[20]), (21, &serde_json::Value::Null));
     assert!(
         !column(&project, "animals", "born")
             .properties
@@ -352,6 +380,11 @@ fn parts() -> Vec<mongodb::bson::Document> {
                 "made": date(&format!("2020-01-{i:02}T00:00:00Z")),
                 "note": format!("a note far too long to be worth listing as a value, number {i}"),
                 "lot": if i == 1 { Bson::String("L-1".to_string()) } else { Bson::Int32(i) },
+                "maker": match i {
+                    1 | 2 => format!("Maker {i} "),
+                    3 => format!(" Maker {i}"),
+                    _ => format!("Maker {i}"),
+                },
             }
         })
         .collect()
@@ -415,6 +448,14 @@ async fn high_cardinality_fields_give_statistics_common_values_and_format() {
     assert_eq!(made.properties["mqlc.max"], r#""2020-01-30T00:00:00Z""#);
     assert!(!made.properties.contains_key("mqlc.topValues"));
 
+    // Strings with leading or trailing whitespace, which an exact match must
+    // include, are counted; a field without any says nothing.
+    assert_eq!(
+        column(&project, "parts", "maker").properties["mqlc.untrimmed"],
+        "3"
+    );
+    assert!(!city.properties.contains_key("mqlc.untrimmed"));
+
     // Values too long to list are summarized but never shown.
     let note = column(&project, "parts", "note");
     assert_eq!(note.properties["mqlc.distinct"], "30");
@@ -432,16 +473,17 @@ async fn references_by_object_id_or_a_key_named_for_a_collection_become_relation
                 doc! {
                     "_id": "p1", "ownerId": "o1", "home": s1, "licence": { "id": "L1" },
                     "visits": [{ "vetId": "V1" }], "toyIds": ["t1", "t2"], "breederId": "b1",
-                    "chipId": "c1", "keeperId": s2,
+                    "chipId": "c1", "keeperId": s2, "insId": "i1",
                 },
                 doc! {
                     "_id": "p2", "ownerId": "o1", "home": s1, "licence": { "id": "L2" },
                     "visits": [{ "vetId": "V2" }, { "vetId": "V1" }], "breederId": "b9",
+                    "insId": "i2",
                 },
                 // A copy of the pet's own key is no reference; its mother is.
                 doc! {
                     "_id": "p3", "ownerId": "o2", "licence": { "id": "L3" }, "petId": "p3",
-                    "motherPetId": "p1",
+                    "motherPetId": "p1", "insId": "i9",
                 },
             ],
         ),
@@ -461,6 +503,11 @@ async fn references_by_object_id_or_a_key_named_for_a_collection_become_relation
         ("keepers", vec![doc! { "_id": "k1" }]),
         // Half the breeders referred to do not exist: not a reference.
         ("breeders", vec![doc! { "_id": "b1" }]),
+        // Named for insurers by its first letters; most insurers referred
+        // to exist.
+        ("insurers", vec![doc! { "_id": "i1" }, doc! { "_id": "i2" }]),
+        // Abbreviated by insId too, and first by name, but not referred to.
+        ("inspections", vec![doc! { "_id": "x1" }]),
     ])
     .await;
 
@@ -532,6 +579,13 @@ async fn references_by_object_id_or_a_key_named_for_a_collection_become_relation
                 "keeperId",
             ),
             (
+                "pets.insId",
+                ["pets", "insurers"],
+                serde_json::json!("ONE_TO_ONE"),
+                "pets.insId = insurers._id",
+                "insId",
+            ),
+            (
                 "pets.motherPetId",
                 ["pets", "pets"],
                 serde_json::json!("ONE_TO_ONE"),
@@ -543,6 +597,10 @@ async fn references_by_object_id_or_a_key_named_for_a_collection_become_relation
     assert_eq!(
         project.mdl.relationships[0].properties["mqlc.matched"],
         "2/2"
+    );
+    assert_eq!(
+        project.mdl.relationships[6].properties["mqlc.matched"],
+        "2/3"
     );
 }
 

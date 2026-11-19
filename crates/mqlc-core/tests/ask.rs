@@ -317,6 +317,49 @@ async fn the_auto_mdl_arm_sends_the_profiled_mdl_in_place_of_the_official_descri
 }
 
 #[tokio::test]
+async fn the_auto_mdl_says_how_many_values_of_a_reference_have_nothing_to_refer_to() {
+    let data = dataset_dir();
+    let mongo = mongo_with_collections([
+        (
+            "animals",
+            vec![
+                doc! { "ownerId": "o1" },
+                doc! { "ownerId": "o2" },
+                doc! { "ownerId": "o9" },
+            ],
+        ),
+        ("owners", vec![doc! { "_id": "o1" }, doc! { "_id": "o2" }]),
+    ])
+    .await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::AutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
+
+    let context = &engine.llm().requests()[0].context;
+    let line = r#"{"field_name": "ownerId", "data_type": "String", "references": "owners._id", "references_matched": "2/3"}"#;
+    assert!(context.contains(line), "{line} not in {context}");
+    let instructions = context.split("Instructions:").nth(1).unwrap();
+    assert!(
+        instructions.contains("references_matched"),
+        "{instructions}"
+    );
+}
+
+#[tokio::test]
 async fn the_auto_mdl_summarizes_fields_with_too_many_values_to_list() {
     let data = dataset_dir();
     let mongo = mongo_with(
@@ -330,6 +373,7 @@ async fn the_auto_mdl_summarizes_fields_with_too_many_values_to_list() {
                 doc! {
                     "_id": i, "name": name, "chip": format!("CH-{i:04}"), "weight": i * 2,
                     "born": DateTime::from_millis(i64::from(i) * 86_400_000),
+                    "breed": if i <= 2 { format!("Breed {i} ") } else { format!("Breed {i}") },
                 }
             })
             .collect(),
@@ -359,9 +403,12 @@ async fn the_auto_mdl_summarizes_fields_with_too_many_values_to_list() {
         r#"{"field_name": "chip", "data_type": "String", "format": "[A-Z]{2}-\\d{4}"}"#,
         r#"{"field_name": "weight", "data_type": "Int32", "min": 2, "max": 60}"#,
         r#"{"field_name": "born", "data_type": "Date", "min": "1970-01-02T00:00:00Z", "max": "1970-01-31T00:00:00Z"}"#,
+        r#"{"field_name": "breed", "data_type": "String", "format": "[A-Z]+[a-z]+ \\d+", "untrimmed": 2}"#,
     ] {
         assert!(context.contains(line), "{line} not in {context}");
     }
+    let instructions = context.split("Instructions:").nth(1).unwrap();
+    assert!(instructions.contains("untrimmed"), "{instructions}");
 }
 
 #[tokio::test]

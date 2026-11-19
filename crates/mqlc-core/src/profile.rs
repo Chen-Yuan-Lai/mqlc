@@ -189,14 +189,19 @@ async fn exclusions(
 /// Values of a field checked against the `_id`s of a collection it may
 /// refer to.
 const REFERENCE_PROBE: usize = 100;
-/// The share of those values that must be `_id`s there.
+/// The share of those values that must be `_id`s there, for an ObjectId
+/// field not named for the collection.
 const REFERENCE_SHARE: f64 = 0.9;
+/// The share, exceeded, for a field named for the collection: the name says
+/// it refers there, so values with no `_id` there are dangling references,
+/// such as people who left, rather than evidence against it.
+const NAMED_REFERENCE_SHARE: f64 = 0.5;
 
-/// The collection `field` refers to, if any: the collection it is named for
+/// The collection `field` refers to, if any: a collection it is named for
 /// (`accountId`, `account_id` or `account.id` for `accounts`), else, for an
-/// ObjectId field, any collection with ObjectId `_id`s. Nine in ten of the
-/// field's first distinct strings, integers and ObjectIds must be `_id`s of
-/// that collection.
+/// ObjectId field, any collection with ObjectId `_id`s. More than half of
+/// the field's first distinct strings, integers and ObjectIds must be `_id`s
+/// of a collection it is named for, nine in ten of any other.
 async fn reference(
     db: &mongodb::Database,
     from: &CollectionSample,
@@ -213,12 +218,12 @@ async fn reference(
     if probe.is_empty() {
         return Ok(None);
     }
-    let mut targets: Vec<&CollectionSample> = Vec::new();
-    let named = named_collection(&field.path, &from.name, collections);
-    targets.extend(named);
+    let named = named_collections(&field.path, &from.name, collections);
+    let is_named = |c: &CollectionSample| named.iter().any(|n| n.name == c.name);
+    let mut targets = named.clone();
     if probe.iter().any(|v| matches!(v, Bson::ObjectId(_))) {
         targets.extend(collections.iter().filter(|c| {
-            !named.is_some_and(|n| std::ptr::eq(n, *c))
+            !is_named(c)
                 && c.fields
                     .get("_id")
                     .is_some_and(|id| id.types.has("ObjectId"))
@@ -229,7 +234,13 @@ async fn reference(
             .collection::<Document>(&target.name)
             .count_documents(doc! { "_id": { "$in": probe.clone() } })
             .await?;
-        if (matched as f64) < REFERENCE_SHARE * probe.len() as f64 {
+        let share = matched as f64 / probe.len() as f64;
+        let enough = if is_named(target) {
+            share > NAMED_REFERENCE_SHARE
+        } else {
+            share >= REFERENCE_SHARE
+        };
+        if !enough {
             continue;
         }
         let join_type = if field.types.has("Array") || field.in_array.is_some() {
@@ -257,59 +268,68 @@ async fn reference(
     Ok(None)
 }
 
-/// The collection a key at `path` is named for: its last segment less an
+/// The collections a key at `path` is named for: its last segment less an
 /// `Id`, `ID` or `_id` suffix (plural too), or the segment before a bare
 /// `id`, ending in the collection's name, singular or plural, ignoring case
-/// and underscores. The longest such name wins. A key named just for its own
-/// collection (`customerId` in `customers`) is a copy of its `_id`, not a
-/// reference.
-fn named_collection<'a>(
+/// and underscores; the longest such name wins, the first in name order of
+/// equals. Failing that, every collection whose name it begins with three or
+/// more letters (`profId` for `professors`), in name order. A key named just
+/// for its own collection, or abbreviating it (`customerId` or `custId` in
+/// `customers`), is a copy of its `_id`, not a reference.
+fn named_collections<'a>(
     path: &str,
     from: &str,
     collections: &'a [CollectionSample],
-) -> Option<&'a CollectionSample> {
+) -> Vec<&'a CollectionSample> {
     let mut segments = path.rsplit('.');
-    let last = segments.next()?;
+    let Some(last) = segments.next() else {
+        return Vec::new();
+    };
     let stem = ["Ids", "IDs", "_ids", "Id", "ID", "_id"]
         .iter()
         .find_map(|suffix| last.strip_suffix(suffix))
-        .or((last == "id" || last == "ids").then_some(""))?;
+        .or((last == "id" || last == "ids").then_some(""));
     let stem = match stem {
-        "" => segments.next()?,
+        Some("") => segments.next(),
         stem => stem,
+    };
+    let Some(stem) = stem else {
+        return Vec::new();
     };
     let normalize = |s: &str| s.to_ascii_lowercase().replace('_', "");
     let stem = normalize(stem);
-    collections
-        .iter()
-        .filter_map(|c| {
-            let name = normalize(&c.name);
-            let forms = [
-                Some(name.clone()),
-                name.strip_suffix("ies").map(|s| format!("{s}y")),
-                name.strip_suffix("es").map(str::to_string),
-                name.strip_suffix('s').map(str::to_string),
-            ];
-            let forms: Vec<String> = forms.into_iter().flatten().collect();
-            if c.name == from && forms.contains(&stem) {
-                return None;
+    let mut best_ending: Option<(usize, &CollectionSample)> = None;
+    let mut abbreviated = Vec::new();
+    for c in collections {
+        let name = normalize(&c.name);
+        let forms = [
+            Some(name.clone()),
+            name.strip_suffix("ies").map(|s| format!("{s}y")),
+            name.strip_suffix("es").map(str::to_string),
+            name.strip_suffix('s').map(str::to_string),
+        ];
+        let forms: Vec<String> = forms.into_iter().flatten().collect();
+        let abbreviates = stem.len() >= 3 && forms.iter().any(|f| f.starts_with(&stem));
+        if c.name == from && (forms.contains(&stem) || abbreviates) {
+            continue;
+        }
+        let ending = forms
+            .iter()
+            .filter(|f| !f.is_empty() && stem.ends_with(f.as_str()))
+            .map(String::len)
+            .max();
+        if let Some(len) = ending {
+            if best_ending.is_none_or(|(best, _)| len > best) {
+                best_ending = Some((len, c));
             }
-            forms
-                .into_iter()
-                .filter(|f| !f.is_empty() && stem.ends_with(f.as_str()))
-                .map(|f| f.len())
-                .max()
-                .map(|len| (len, c))
-        })
-        // The first of the longest, in name order.
-        .fold(
-            None,
-            |best: Option<(usize, &CollectionSample)>, (len, c)| match best {
-                Some((b, _)) if b >= len => best,
-                _ => Some((len, c)),
-            },
-        )
-        .map(|(_, c)| c)
+        } else if abbreviates {
+            abbreviated.push(c);
+        }
+    }
+    match best_ending {
+        Some((_, c)) => vec![c],
+        None => abbreviated,
+    }
 }
 
 fn instructions(sample_size: usize) -> Vec<Instruction> {
@@ -324,13 +344,17 @@ fn instructions(sample_size: usize) -> Vec<Instruction> {
          always present."
             .to_string(),
         "references names the collection _id a field's values refer to, for \
-         $lookup; such a field's values are not listed."
+         $lookup; such a field's values are not listed. references_matched, \
+         when some values have no such _id, is how many of the distinct values \
+         checked do: the rest find nothing in a $lookup."
             .to_string(),
         format!(
             "values lists every value a field takes (array elements for an array), \
-             most frequent first. A field with more values has common_values instead, \
+             null included, most frequent first. A field with more values has common_values instead, \
              up to {TOP_K} of its most frequent that repeat, with min and max for numbers and dates, and a \
-             format: a regex at least {}% of its strings match in full.",
+             format: a regex at least {}% of its strings match in full. untrimmed \
+             counts the strings with leading or trailing whitespace, which an \
+             exact match must include.",
             (FORMAT_SHARE * 100.0) as u32
         ),
         format!(
@@ -454,13 +478,14 @@ impl Fields {
                     set("mqlc.elementTypes", f.element_types.joined());
                 }
             }
-            if f.types.has("Document") || f.element_types.has("Document") {
+            let documents = f.types.has("Document") || f.element_types.has("Document");
+            if documents {
                 set("mqlc.embedded", "true".to_string());
             }
             if let Some(array) = &f.in_array {
                 set("mqlc.inArray", array.clone());
             }
-            f.values.describe(&mut properties);
+            f.values.describe(&mut properties, !documents);
             let not_null = always_there && f.present == enclosing && !f.types.has("Null");
             out.push(Column {
                 name: f.path.clone(),
@@ -480,7 +505,8 @@ impl Fields {
 /// Distinct values kept per field; past this many, new values are counted
 /// as values but not kept.
 const DISTINCT_CAP: usize = 10_000;
-/// A field with at most this many distinct values lists them all.
+/// A field with at most this many distinct values other than null lists them
+/// all.
 const ENUM_LIMIT: usize = 20;
 /// Longer strings are never listed as values.
 const MAX_VALUE_CHARS: usize = 40;
@@ -505,6 +531,7 @@ enum Scalar {
     Bool(bool),
     ObjectId(ObjectId),
     Date(i64),
+    Null,
 }
 
 impl Scalar {
@@ -517,6 +544,7 @@ impl Scalar {
             Bson::Boolean(b) => Self::Bool(*b),
             Bson::ObjectId(id) => Self::ObjectId(*id),
             Bson::DateTime(d) => Self::Date(d.timestamp_millis()),
+            Bson::Null => Self::Null,
             _ => return None,
         })
     }
@@ -525,7 +553,7 @@ impl Scalar {
     fn listable(&self) -> bool {
         match self {
             Self::Str(s) => s.chars().count() <= MAX_VALUE_CHARS,
-            Self::Int(_) | Self::Double(_) | Self::Bool(_) => true,
+            Self::Int(_) | Self::Double(_) | Self::Bool(_) | Self::Null => true,
             Self::ObjectId(_) | Self::Date(_) => false,
         }
     }
@@ -536,7 +564,7 @@ impl Scalar {
             Self::Str(s) => Some(Bson::String(s.clone())),
             Self::Int(i) => Some(Bson::Int64(*i)),
             Self::ObjectId(id) => Some(Bson::ObjectId(*id)),
-            Self::Double(_) | Self::Bool(_) | Self::Date(_) => None,
+            Self::Double(_) | Self::Bool(_) | Self::Date(_) | Self::Null => None,
         }
     }
 
@@ -551,6 +579,7 @@ impl Scalar {
                 .try_to_rfc3339_string()
                 .unwrap_or_else(|_| ms.to_string())
                 .into(),
+            Self::Null => serde_json::Value::Null,
         }
     }
 }
@@ -565,8 +594,10 @@ struct Values {
     overflow: bool,
     numbers: Range<f64>,
     dates: Range<i64>,
-    /// Scalar values seen, distinct or not.
+    /// Scalar values other than null seen, distinct or not.
     seen: u64,
+    /// Strings seen with leading or trailing whitespace.
+    untrimmed: u64,
     /// String shapes with each run of a character class written as its
     /// length (`\d{4}`), then as any length (`\d+`).
     exact_shapes: ShapeCounts,
@@ -676,7 +707,14 @@ impl Values {
         let Some(value) = Scalar::of(value) else {
             return;
         };
-        self.seen += 1;
+        if value != Scalar::Null {
+            self.seen += 1;
+        }
+        if let Scalar::Str(s) = &value
+            && s.trim() != s
+        {
+            self.untrimmed += 1;
+        }
         match &value {
             Scalar::Int(i) => self.numbers.add(*i as f64, &value),
             Scalar::Double(bits) => self.numbers.add(f64::from_bits(*bits), &value),
@@ -697,20 +735,32 @@ impl Values {
         }
     }
 
-    /// Whether no value was seen twice (as far as values were kept).
+    /// Whether no value other than null was seen twice (as far as values
+    /// were kept).
     fn all_distinct(&self) -> bool {
-        !self.overflow && self.counts.iter().all(|(_, count)| *count == 1)
+        !self.overflow
+            && self
+                .counts
+                .iter()
+                .all(|(v, count)| *v == Scalar::Null || *count == 1)
     }
 
     /// Most frequent first; the sort is stable, so ties stay in seen order.
-    fn sorted(&self) -> Vec<&(Scalar, u64)> {
-        let mut counts: Vec<_> = self.counts.iter().collect();
+    fn sorted(counts: &[&(Scalar, u64)]) -> Vec<(Scalar, u64)> {
+        let mut counts: Vec<_> = counts.iter().map(|&c| c.clone()).collect();
         counts.sort_by_key(|c| std::cmp::Reverse(c.1));
         counts
     }
 
-    fn describe(&self, properties: &mut BTreeMap<String, String>) {
-        if self.counts.is_empty() {
+    /// `with_null`: whether a null counts as a value, as it does for a field
+    /// of scalars but not for one whose documents are not listed.
+    fn describe(&self, properties: &mut BTreeMap<String, String>, with_null: bool) {
+        let counts: Vec<_> = self
+            .counts
+            .iter()
+            .filter(|(v, _)| with_null || *v != Scalar::Null)
+            .collect();
+        if counts.is_empty() {
             return;
         }
         let mut set = |k: &str, v: String| properties.insert(k.to_string(), v);
@@ -719,22 +769,26 @@ impl Values {
             if self.overflow {
                 format!(">{DISTINCT_CAP}")
             } else {
-                self.counts.len().to_string()
+                counts.len().to_string()
             },
         );
-        if !self.overflow
-            && self.counts.len() <= ENUM_LIMIT
-            && self.counts.iter().all(|(v, _)| v.listable())
-        {
-            let values: Vec<_> = self.sorted().iter().map(|(v, _)| v.json()).collect();
+        if self.untrimmed > 0 {
+            set("mqlc.untrimmed", self.untrimmed.to_string());
+        }
+        // A null does not take the place of a value.
+        let values = counts.iter().filter(|(v, _)| *v != Scalar::Null).count();
+        if !self.overflow && values <= ENUM_LIMIT && counts.iter().all(|(v, _)| v.listable()) {
+            let values: Vec<_> = Self::sorted(&counts)
+                .iter()
+                .map(|(v, _)| v.json())
+                .collect();
             set(
                 "mqlc.enum",
                 serde_json::to_string(&values).expect("values serialize"),
             );
             return;
         }
-        let top: Vec<_> = self
-            .sorted()
+        let top: Vec<_> = Self::sorted(&counts)
             .into_iter()
             .filter(|(v, count)| v.listable() && *count > 1)
             .take(TOP_K)
