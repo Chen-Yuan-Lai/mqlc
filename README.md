@@ -318,7 +318,11 @@ dev:
 `official-auto-mdl` keeps each official field line as written and appends
 what the auto MDL says of the same path (`in_array`, `present`,
 `references`, values, `untrimmed`), with the observed type as
-`observed_type` where it differs from the official `data_type`; fields only
+`observed_type` where it adds to the official `data_type` (a type it does not
+name, counting `Int32`, `Int64`, `Double` and `Float` as `Number` and
+`Object` as `Document`; null where it does not allow
+null; or an array's element types); an official field named after its
+collection (`schools.cdsCode`) is matched without that prefix; fields only
 the profile saw follow the official ones. The 343 questions without `mongodb_evidence` (140 on dev) get
 the official prompt unchanged under `official-evidence` and are scored like
 the rest, so all four arms answer the same questions.

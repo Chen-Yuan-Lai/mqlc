@@ -492,37 +492,18 @@ async fn the_evidence_arm_sends_a_sample_without_evidence_the_official_prompt_un
 
 #[tokio::test]
 async fn the_official_and_auto_mdl_arm_merges_the_auto_mdl_into_each_official_field_line() {
-    let data = dataset_dir();
-    let description = data
-        .path()
-        .join("databases/dev/pets/collections_description/animals.jsonl");
-    let official = fs::read_to_string(&description).unwrap();
-    let visits = r#"{"field_name": "visits", "field_description": "Vet visits", "data_type": "Array", "required": false, "value_description": ""}"#;
-    fs::write(&description, format!("{official}\n{visits}\n")).unwrap();
-    let mongo = mongo_with(vec![
-        doc! { "name": "Tom", "species": "cat", "visits": [{ "vet": "V1" }] },
-        doc! { "name": "Rex", "species": "dog" },
-    ])
-    .await;
-    let knowledge = tempfile::tempdir().unwrap();
-    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
-        .await
-        .unwrap()
-        .save(&knowledge.path().join(DB_ID))
-        .unwrap();
-    let engine = Engine::new(
-        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
-        mongo.client.clone(),
-        Dataset::open(data.path()).unwrap(),
+    let context = &merged_context(
+        &[
+            r#"{"field_name": "name", "field_description": "Pet name", "data_type": "String", "required": true, "value_description": ""}"#,
+            r#"{"field_name": "species", "field_description": "Kind of animal", "data_type": "String", "required": true, "value_description": "cat, dog"}"#,
+            r#"{"field_name": "visits", "field_description": "Vet visits", "data_type": "Array", "required": false, "value_description": ""}"#,
+        ],
+        vec![
+            doc! { "name": "Tom", "species": "cat", "visits": [{ "vet": "V1" }] },
+            doc! { "name": "Rex", "species": "dog" },
+        ],
     )
-    .with_arm(Arm::OfficialAutoMdl {
-        dir: knowledge.path().to_path_buf(),
-    });
-
-    let sample = engine.dataset().sample("dev_7").unwrap().clone();
-    engine.ask(&sample).await.unwrap();
-
-    let context = &engine.llm().requests()[0].context;
+    .await;
     // Official fields first, in the official order, each with what the
     // profile adds; then the fields only the profile saw.
     let expected_start = concat!(
@@ -545,7 +526,86 @@ async fn the_official_and_auto_mdl_arm_merges_the_auto_mdl_into_each_official_fi
         "{context}"
     );
     assert_eq!(context.matches("Collection: animals").count(), 1);
+}
+
+#[tokio::test]
+async fn an_official_field_named_with_its_collection_is_merged_with_the_same_path() {
+    let context = merged_context(
+        &[
+            r#"{"field_name": "animals._id", "field_description": "Id", "data_type": "ObjectId", "required": true, "value_description": ""}"#,
+            r#"{"field_name": "animals.name", "field_description": "Pet name", "data_type": "String", "required": true, "value_description": ""}"#,
+        ],
+        vec![doc! { "name": "Tom" }, doc! { "name": "Rex" }],
+    )
+    .await;
+
+    let expected = concat!(
+        "Collection: animals\n",
+        r#"{"field_name": "animals._id", "field_description": "Id", "data_type": "ObjectId", "required": true, "value_description": ""}"#,
+        "\n",
+        r#"{"field_name": "animals.name", "field_description": "Pet name", "data_type": "String", "required": true, "value_description": "", "values": ["Tom","Rex"]}"#,
+        "\n\nInstructions:",
+    );
+    assert!(context.contains(expected), "{context}");
+}
+
+#[tokio::test]
+async fn an_observed_type_is_added_only_where_the_data_adds_to_the_official_type() {
+    let context = merged_context(
+        &[
+            r#"{"field_name": "age", "field_description": "Age", "data_type": "Number", "required": true, "value_description": ""}"#,
+            r#"{"field_name": "chip", "field_description": "Chip", "data_type": "Null, String", "required": true, "value_description": ""}"#,
+            r#"{"field_name": "owner", "field_description": "Owner", "data_type": "String", "required": true, "value_description": ""}"#,
+            r#"{"field_name": "tag", "field_description": "Tag", "data_type": "Number", "required": true, "value_description": ""}"#,
+        ],
+        vec![
+            doc! { "age": 3, "chip": "c1", "owner": "Ann", "tag": "t1" },
+            doc! { "age": 4, "chip": null, "owner": null, "tag": "t2" },
+        ],
+    )
+    .await;
+
+    let expected = concat!(
+        r#"{"field_name": "age", "field_description": "Age", "data_type": "Number", "required": true, "value_description": "", "values": [3,4]}"#,
+        "\n",
+        r#"{"field_name": "chip", "field_description": "Chip", "data_type": "Null, String", "required": true, "value_description": "", "values": ["c1",null]}"#,
+        "\n",
+        r#"{"field_name": "owner", "field_description": "Owner", "data_type": "String", "required": true, "value_description": "", "observed_type": "String | Null", "values": ["Ann",null]}"#,
+        "\n",
+        r#"{"field_name": "tag", "field_description": "Tag", "data_type": "Number", "required": true, "value_description": "", "observed_type": "String", "values": ["t1","t2"]}"#,
+    );
+    assert!(context.contains(expected), "{context}");
+}
+
+/// The prompt `Arm::OfficialAutoMdl` sends for the fixture's database with
+/// `official` as its description and holding `docs`.
+async fn merged_context(official: &[&str], docs: Vec<mongodb::bson::Document>) -> String {
+    let data = dataset_dir();
+    fs::write(
+        data.path()
+            .join("databases/dev/pets/collections_description/animals.jsonl"),
+        official.join("\n") + "\n",
+    )
+    .unwrap();
+    let mongo = mongo_with(docs).await;
+    let knowledge = tempfile::tempdir().unwrap();
+    profile::profile(&mongo.client, DB_ID, &ProfileOptions::default())
+        .await
+        .unwrap()
+        .save(&knowledge.path().join(DB_ID))
+        .unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_arm(Arm::OfficialAutoMdl {
+        dir: knowledge.path().to_path_buf(),
+    });
+    let sample = engine.dataset().sample("dev_7").unwrap().clone();
+    engine.ask(&sample).await.unwrap();
     assert_eq!(engine.arm().name(), "official-auto-mdl");
+    engine.llm().requests()[0].context.clone()
 }
 
 /// Moves the fixture's database to the train split, where a human MDL may be

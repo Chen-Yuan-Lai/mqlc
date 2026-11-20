@@ -173,9 +173,10 @@ impl MdlProject {
     /// The official schema description (`official`: field lines per
     /// collection) with this knowledge merged in, in the same layout: each
     /// official field line keeps its text and gains what the MDL says of the
-    /// same path, the MDL's `data_type` as `observed_type` when it differs;
-    /// then each field only the MDL has, as `render` writes it. Collections
-    /// of either side, in name order.
+    /// same path (with or without the collection's name in front), the MDL's
+    /// `data_type` as `observed_type` when it adds to the official one; then
+    /// each field only the MDL has, as `render` writes it. Collections of
+    /// either side, in name order.
     pub fn render_with_official(&self, official: &[(String, Vec<String>)]) -> String {
         use serde_json::Value;
         let references = self.references();
@@ -207,7 +208,13 @@ impl MdlProject {
                         let field: Option<Value> = serde_json::from_str(text).ok();
                         let field_name = field.as_ref().and_then(|f| f["field_name"].as_str());
                         let official_type = field.as_ref().and_then(|f| f["data_type"].as_str());
-                        let Some(column) = columns.iter().find(|c| Some(path(c)) == field_name)
+                        // Some official files name each field after its
+                        // collection too (`schools.cdsCode`).
+                        let unprefixed =
+                            field_name.and_then(|f| f.strip_prefix(name)?.strip_prefix('.'));
+                        let column_at =
+                            |f: Option<&str>| f.and_then(|f| columns.iter().find(|c| path(c) == f));
+                        let Some(column) = column_at(field_name).or_else(|| column_at(unprefixed))
                         else {
                             return text.clone();
                         };
@@ -216,8 +223,12 @@ impl MdlProject {
                             .into_iter()
                             .filter_map(|(key, value)| match key {
                                 "field_name" => None,
-                                "data_type" if value.as_str() == official_type => None,
-                                "data_type" => Some(("observed_type", value)),
+                                "data_type" => value
+                                    .as_str()
+                                    .is_some_and(|seen| {
+                                        adds_to_official_type(seen, official_type.unwrap_or(""))
+                                    })
+                                    .then_some(("observed_type", value)),
                                 _ => Some((key, value)),
                             })
                             .collect();
@@ -297,7 +308,37 @@ struct Reference {
 
 /// What `render_with_official` adds to the instructions: the profiler wrote
 /// them for `data_type` as the types seen, which an official line's is not.
-const OBSERVED_TYPE_NOTE: &str = "In a field with a field_description, data_type is the official description's type, not the types seen; the types seen, in the form described above for data_type, are its observed_type where they differ. A field without a field_description was seen only in the sampled documents.";
+const OBSERVED_TYPE_NOTE: &str = "In a field with a field_description, data_type is the official description's type, not the types seen; the types seen, in the form described above for data_type, are its observed_type where they add to it: a type it does not name (Int32, Int64, Double and Float are all Number, Object is Document), null where it does not allow null, or an array's element types. A field without a field_description was seen only in the sampled documents.";
+
+/// Whether the types seen (`String | Null`, `Array<Document>`) say more than
+/// the official `data_type` (`Null, String`, `Array`): a type it does not
+/// name, null where it does not allow it, or an array's element types. Read
+/// in the official vocabulary, where every number is a `Number` and the order
+/// does not count.
+fn adds_to_official_type(seen: &str, official: &str) -> bool {
+    let word = |t: &str| match t.trim() {
+        "Int32" | "Int64" | "Double" | "Float" => "Number".to_string(),
+        "Object" => "Document".to_string(),
+        t => t.to_string(),
+    };
+    let official: HashSet<String> = official.split([',', '|']).map(word).collect();
+    top_level_types(seen).any(|t| !official.contains(&word(t)))
+}
+
+/// `A | Array<B | C>` as `A`, `Array<B | C>`.
+fn top_level_types(types: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0;
+    types
+        .split(move |c| {
+            match c {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                _ => {}
+            }
+            c == '|' && depth == 0
+        })
+        .map(str::trim)
+}
 
 /// `Collection: <name>`, then the model's `description` (a person's) if it
 /// has one.
