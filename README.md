@@ -76,6 +76,7 @@ c094437 (#11).
 | Haiku 4.5 | [official](runs/baseline-all/manifest.json) (the baseline's dev half) | 97.75 | 44.80 | | | 18.68 | 1.37 |
 | Haiku 4.5 | [auto-mdl](runs/expA-dev-auto-mdl/manifest.json) | 97.68 | 47.54 | +2.74 | 0.018 | 20.65 | 1.69 |
 | Haiku 4.5 | [official-auto-mdl](runs/expA-dev-official-auto-mdl/manifest.json) | 97.61 | **49.65** | +4.85 | <0.001 | 20.29 | 1.69 |
+| Haiku 4.5 | [official-auto-mdl](runs/c20-dev-official-auto-mdl/manifest.json), merge of #20 | 98.31 | **50.28** | +5.48 | <0.001 | 20.51 | 1.67 |
 | Haiku 4.5 | [official-evidence](runs/expA-dev-official-evidence/manifest.json) (upper bound) | 97.47 | 61.24 | +16.44 | <0.001 | 25.91 | 1.37 |
 | Sonnet 4.5 | [official](runs/sonnet-dev-official/manifest.json) | 98.53 | 50.07 | | | 27.39 | 3.91 |
 | Sonnet 4.5 | [official-auto-mdl](runs/sonnet-dev-official-auto-mdl/manifest.json) | 99.30 | **54.56** | +4.49 | <0.001 | 31.46 | 4.80 |
@@ -87,6 +88,16 @@ on debit_card_specializing and 16 on student_club but loses 7 on formula_1.
 Evidence, written by hand for each question, is still 11.6 points above it.
 Sonnet 4.5 gains about as much from the merged auto MDL as Haiku. The new
 runs cost USD 13.46 (#11).
+
+The merge of #20 (official fields named after their collection merged too;
+`observed_type` only where it adds to the official type) was settled on
+train, where it scored 48.01 against 47.67 for the merge before it (p =
+0.637) and 39.61 for official. On dev it is +0.63 over the merge before it
+(p = 0.356): no measurable gain, a shorter prompt (1,286 `observed_type`
+lines across the 21 databases down to 368) and no contradicting types. It
+regains 4.9 points on formula_1 and loses 4.8 on california_schools, the
+database whose official fields it now matches (83 questions, so 4 of
+them). The train and dev runs of #20 cost USD 10.71.
 
 ## Setup
 
