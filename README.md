@@ -158,6 +158,7 @@ are refused before they reach the database.
 | `--mongo-uri` | `MQLC_MONGO_URI` | `mongodb://mqlc:mqlc@localhost:27017/?authSource=admin` |
 | `--model` | `MQLC_MODEL` | `claude-haiku-4-5` |
 | `--arm` | | `official` (experiment A: `auto-mdl`, `official-auto-mdl`, `official-evidence`, see [Experiment A](#experiment-a); diagnostics: `official-prompt-keys`, `official-tagged`, below) |
+| `--repair` | | `off` (experiment B: `execution`, `static-check`, see [Experiment B](#experiment-b)) |
 | `--temperature` | | `0` |
 | `--mdl-dir` | `MQLC_MDL_DIR` | `mdl/auto` |
 | `--human-mdl-dir` | `MQLC_HUMAN_MDL_DIR` | `mdl/human` |
@@ -353,6 +354,40 @@ silently left out. Each manifest invocation records the MDL directory
 knowledge it sent (the official description, the MDL, the merged text, and
 for `official-evidence` each question's evidence too), so a run refuses to
 resume once its dataset or MDL has changed.
+
+### Experiment B
+
+Experiment B measures what the static check adds to repairing (ADR 0013).
+Both arms feed errors back to the model for another reply, at most twice for
+each kind of error:
+
+| `--repair` | Repairs |
+|---|---|
+| `execution` | an execution error (the control arm) |
+| `static-check` | before a pipeline runs, what the static check finds; then execution errors as in `execution` (the IR arm) |
+
+The static check reads the pipeline as IR and follows the documents through
+it against the official schema description (whatever `--arm` puts in the
+prompt): a field path the documents at that stage do not have
+(`unknown_field`), a collection the description does not list
+(`unknown_collection`), a value compared with a field that never holds its
+type, such as a `Date` with a string (`type_mismatch`), and `$unwind` on a
+field that is never an array (`unwind_non_array`). A field described as a
+document or array with nothing under it, and everything after a raw stage,
+is not checked. A pipeline still failing the check after two repairs runs
+anyway. Repairs are synchronous calls even in batch mode, at the full price.
+Each record lists its repairs (`repairs`: the errors fed back, the reply,
+tokens and cost) and what the check still found (`check_errors`); its
+`usage` and `cost_usd` include the repairs. `score.py` adds a `repairs`
+section to `summary.json`: rounds and errors fed back per kind, the samples
+each error was fed back for, repair tokens and cost, and the Soft-EX of the
+repaired samples.
+
+```bash
+cargo run -p mqlc -- static-check    # train gold pipelines; anything flagged is a false positive
+```
+
+On the 1,762 train gold pipelines the check reports nothing.
 
 ### IR coverage
 

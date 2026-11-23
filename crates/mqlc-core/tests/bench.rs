@@ -7,7 +7,7 @@ use mongodb::bson::doc;
 use mqlc_core::bench::{self, Mode, Options, Progress, Record};
 use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::testing::{Scripted, ScriptedLlm};
-use mqlc_core::{Arm, Dataset, Engine, Usage};
+use mqlc_core::{Arm, Dataset, Engine, Repair, Usage};
 use support::{DB_ID, dataset_dir, mongo_with, reply};
 
 fn records(run_dir: &Path) -> Vec<Record> {
@@ -960,4 +960,190 @@ async fn a_human_mdl_run_over_a_dev_database_stops_before_asking_anything() {
     );
     assert!(engine.llm().requests().is_empty());
     assert!(!run_dir.path().join("results.jsonl").exists());
+}
+
+#[tokio::test]
+async fn a_repaired_answer_records_each_repair_and_costs_every_call() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let run_dir = tempfile::tempdir().unwrap();
+    let usage = Usage {
+        input_tokens: 1000,
+        output_tokens: 100,
+        cache_read_input_tokens: 2000,
+        cache_creation_input_tokens: 0,
+    };
+    let first = reply(
+        "animals",
+        r#"[{"$match": {"colour": "red"}}, {"$count": "n"}]"#,
+    );
+    let llm = ScriptedLlm::new([
+        first.clone(),
+        reply("animals", r#"[{"$cnt": "n"}]"#),
+        reply("animals", r#"[{"$count": "n"}]"#),
+        reply("animals", r#"[{"$count": "n"}]"#),
+    ])
+    .with_model("claude-haiku-4-5")
+    .with_usage(usage);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_repair(Repair::StaticCheck);
+    let samples = engine.dataset().samples().to_vec();
+
+    let summary = bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // Haiku 4.5: $1/M input, $5/M output, cache reads at $0.10/M.
+    let per_call = 0.001 + 0.0005 + 0.0002;
+    assert!(
+        (summary.cost_usd - 4.0 * per_call).abs() < 1e-12,
+        "{}",
+        summary.cost_usd
+    );
+    let records = records(run_dir.path());
+    let repaired = &records[0];
+    assert_eq!(repaired.sample_id, "dev_7");
+    assert_eq!(repaired.reply, first);
+    assert_eq!(
+        repaired.pipeline,
+        Some(serde_json::json!([{"$count": "n"}]))
+    );
+    assert_eq!(repaired.row_count, Some(1));
+    assert_eq!(repaired.usage.input_tokens, 3000);
+    assert_eq!(repaired.usage.output_tokens, 300);
+    assert!((repaired.cost_usd.unwrap() - 3.0 * per_call).abs() < 1e-12);
+    let kinds: Vec<&str> = repaired.repairs.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, ["static_check", "execution"]);
+    assert_eq!(repaired.repairs[0].errors[0].kind, "unknown_field");
+    assert_eq!(repaired.repairs[1].errors[0].kind, "execution");
+    assert_eq!(repaired.repairs[1].usage, usage);
+    assert!((repaired.repairs[1].cost_usd.unwrap() - per_call).abs() < 1e-12);
+    assert!(records[1].repairs.is_empty());
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["config"]["ir"], true);
+    assert_eq!(manifest["config"]["max_repairs"], 2);
+
+    let control = Engine::new(
+        ScriptedLlm::new(Vec::<String>::new()).with_model("claude-haiku-4-5"),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_repair(Repair::Execution);
+    let err = bench::run(
+        &control,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, bench::BenchError::ConfigMismatch { .. }),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn the_control_arm_is_recorded_in_the_manifest_and_no_repair_leaves_it_as_before() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let manifest = |dir: &Path| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap()
+    };
+    let control_dir = tempfile::tempdir().unwrap();
+    let plain_dir = tempfile::tempdir().unwrap();
+    for (dir, repair) in [
+        (control_dir.path(), Repair::Execution),
+        (plain_dir.path(), Repair::Off),
+    ] {
+        let llm = ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]);
+        let engine = Engine::new(
+            llm,
+            mongo.client.clone(),
+            Dataset::open(data.path()).unwrap(),
+        )
+        .with_repair(repair);
+        let samples = engine.dataset().samples()[..1].to_vec();
+        bench::run(&engine, dir, &samples, &Options::default(), |_| {})
+            .await
+            .unwrap();
+    }
+
+    let control = manifest(control_dir.path());
+    assert_eq!(control["config"]["ir"], false);
+    assert_eq!(control["config"]["max_repairs"], 2);
+    let plain = manifest(plain_dir.path());
+    assert_eq!(plain["config"]["ir"], false);
+    assert!(plain["config"].get("max_repairs").is_none(), "{plain}");
+    assert!(
+        !fs::read_to_string(plain_dir.path().join("results.jsonl"))
+            .unwrap()
+            .contains("repairs")
+    );
+}
+
+#[tokio::test]
+async fn a_batch_answer_is_repaired_synchronously_at_the_full_price() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let run_dir = tempfile::tempdir().unwrap();
+    let usage = Usage {
+        input_tokens: 1000,
+        output_tokens: 100,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let api = ScriptedLlm::new([
+        reply("animals", r#"[{"$cnt": "n"}]"#),
+        reply("animals", r#"[{"$count": "n"}]"#),
+        reply("animals", r#"[{"$count": "n"}]"#),
+    ])
+    .with_model("claude-haiku-4-5")
+    .with_usage(usage);
+    let engine = Engine::new(
+        api.clone(),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_repair(Repair::Execution);
+    let samples = engine.dataset().samples().to_vec();
+    let batch = Options {
+        mode: Mode::Batch,
+        ..Options::default()
+    };
+
+    bench::run(&engine, run_dir.path(), &samples, &batch, |_| {})
+        .await
+        .unwrap();
+    api.finish_batches();
+    bench::run(&engine, run_dir.path(), &samples, &batch, |_| {})
+        .await
+        .unwrap();
+
+    let records = records(run_dir.path());
+    let repaired = records.iter().find(|r| r.sample_id == "dev_7").unwrap();
+    assert_eq!(repaired.row_count, Some(1));
+    assert_eq!(
+        api.requests().len(),
+        1,
+        "the repair is one synchronous call"
+    );
+    // $1/M input and $5/M output: half that in the batch, full for the repair.
+    let per_call = 0.001 + 0.0005;
+    assert!((repaired.repairs[0].cost_usd.unwrap() - per_call).abs() < 1e-12);
+    assert!((repaired.cost_usd.unwrap() - 1.5 * per_call).abs() < 1e-12);
 }

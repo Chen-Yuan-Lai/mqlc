@@ -36,6 +36,10 @@ pub enum DatasetError {
     },
 }
 
+/// A collection's name, and the `field_name` and `data_type` of each field
+/// its official description lists.
+pub type CollectionFields = (String, Vec<(String, String)>);
+
 /// One line of a `collections_description/<collection>.jsonl` file.
 #[derive(Deserialize)]
 struct FieldDescription {
@@ -209,33 +213,42 @@ impl Dataset {
         db_id: &str,
     ) -> Result<String, DatasetError> {
         self.joined_descriptions(split, db_id, |name, path| {
-            let fields = read(path)?
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| !line.trim().is_empty())
-                .map(|(index, line)| {
-                    let field: FieldDescription =
-                        serde_json::from_str(line).map_err(|source| {
-                            DatasetError::BadDescription {
-                                path: path.to_path_buf(),
-                                line: index + 1,
-                                source,
-                            }
-                        })?;
-                    // Written by hand to keep the files' `", "` and `": "`
-                    // separators, which serde_json's compact output drops.
-                    let quoted = |v: &str| serde_json::to_string(v).expect("strings serialize");
-                    Ok(format!(
+            // Written by hand to keep the files' `", "` and `": "`
+            // separators, which serde_json's compact output drops.
+            let quoted = |v: &str| serde_json::to_string(v).expect("strings serialize");
+            let fields: Vec<String> = field_descriptions(path)?
+                .iter()
+                .map(|field| {
+                    format!(
                         "{{\"field_name\": {}, \"field_description\": {}, \"data_format\": {}, \"value_description\": {}}}",
                         quoted(&field.field_name),
                         quoted(&field.field_description),
                         quoted(&field.data_type),
                         quoted(&field.value_description),
-                    ))
+                    )
                 })
-                .collect::<Result<Vec<_>, DatasetError>>()?;
+                .collect();
             Ok(format!("Collection: {name}\n{}", fields.join("\n")))
         })
+    }
+
+    /// Each collection of a database, in name order, with the `field_name`
+    /// and `data_type` of every field its official description lists.
+    pub fn official_field_types(
+        &self,
+        split: &str,
+        db_id: &str,
+    ) -> Result<Vec<CollectionFields>, DatasetError> {
+        self.description_files(split, db_id)?
+            .into_iter()
+            .map(|(name, path)| {
+                let fields = field_descriptions(&path)?
+                    .into_iter()
+                    .map(|f| (f.field_name, f.data_type))
+                    .collect();
+                Ok((name, fields))
+            })
+            .collect()
     }
 
     /// The official schema description of one database as its field lines
@@ -307,6 +320,21 @@ impl Dataset {
             .map(|p| (p.file_stem().unwrap().to_string_lossy().into_owned(), p))
             .collect())
     }
+}
+
+fn field_descriptions(path: &Path) -> Result<Vec<FieldDescription>, DatasetError> {
+    read(path)?
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str(line).map_err(|source| DatasetError::BadDescription {
+                path: path.to_path_buf(),
+                line: index + 1,
+                source,
+            })
+        })
+        .collect()
 }
 
 /// `sha256:<hex>`, the form hashes take in run manifests.

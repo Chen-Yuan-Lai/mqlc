@@ -8,7 +8,8 @@ use mqlc_core::engine;
 use mqlc_core::mongodb::bson::{Bson, Document};
 use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::{
-    AnswerError, AnthropicClient, Arm, Dataset, Engine, LlmClient, OpenAiClient, Sample, bench, ir,
+    AnswerError, AnthropicClient, Arm, Dataset, Engine, LlmClient, OpenAiClient, Repair, Sample,
+    bench, ir,
 };
 
 #[derive(Parser)]
@@ -76,6 +77,15 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = ArmArg::Official, global = true)]
     arm: ArmArg,
 
+    /// Experiment B: feed errors back to the model for another reply, up to
+    /// twice for each kind. `execution` repairs execution errors (the
+    /// control arm); `static-check` first checks each pipeline against the
+    /// official schema description before it runs and repairs what the check
+    /// finds, then repairs execution errors too (the IR arm). Recorded in the
+    /// run manifest.
+    #[arg(long, value_enum, default_value_t = RepairArg::Off, global = true)]
+    repair: RepairArg,
+
     /// Sampling temperature, recorded in the run manifest.
     #[arg(long, default_value_t = engine::DEFAULT_TEMPERATURE, global = true)]
     temperature: f32,
@@ -118,6 +128,13 @@ enum ArmArg {
     OfficialEvidence,
     HumanMdl,
     OfficialHumanMdl,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum RepairArg {
+    Off,
+    Execution,
+    StaticCheck,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -190,6 +207,15 @@ enum Command {
     /// Report, per split, how many gold pipelines the IR represents without a
     /// raw stage, and what the rest need. Calls no LLM and no database.
     IrCoverage,
+    /// Run the static check on gold pipelines against the official schema
+    /// description: everything it reports is a false positive. Calls no LLM
+    /// and no database.
+    /// Train only: tuning the check on dev would leak (ADR 0006).
+    StaticCheck {
+        /// Only questions on this train database, e.g. restaurant.
+        #[arg(long)]
+        db: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -228,6 +254,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("opening dataset at {}", cli.data_dir.display()))?;
     if let Command::IrCoverage = cli.command {
         print!("{}", ir::Coverage::of(dataset.samples())?);
+        return Ok(());
+    }
+    if let Command::StaticCheck { db } = &cli.command {
+        let samples = dataset
+            .samples()
+            .iter()
+            .filter(|s| s.split == "train")
+            .filter(|s| db.as_ref().is_none_or(|db| &s.db_id == db));
+        print!("{}", ir::GoldCheck::of(&dataset, samples)?);
         return Ok(());
     }
     let mongo = mqlc_core::mongodb::Client::with_uri_str(&cli.mongo_uri).await?;
@@ -297,6 +332,11 @@ async fn main() -> Result<()> {
             dir: cli.human_mdl_dir.clone(),
         },
     };
+    let repair = match cli.repair {
+        RepairArg::Off => Repair::Off,
+        RepairArg::Execution => Repair::Execution,
+        RepairArg::StaticCheck => Repair::StaticCheck,
+    };
     if let Some(budget) = cli.thinking_budget {
         anyhow::ensure!(
             budget >= 1024,
@@ -322,7 +362,8 @@ async fn main() -> Result<()> {
                     .with_arm(arm)
                     .with_temperature(cli.temperature)
                     .with_single_message(cli.single_message)
-                    .with_thinking_budget(cli.thinking_budget),
+                    .with_thinking_budget(cli.thinking_budget)
+                    .with_repair(repair),
             )
             .await
         }
@@ -341,7 +382,8 @@ async fn main() -> Result<()> {
                     .with_arm(arm)
                     .with_temperature(cli.temperature)
                     .with_single_message(cli.single_message)
-                    .with_thinking_budget(cli.thinking_budget),
+                    .with_thinking_budget(cli.thinking_budget)
+                    .with_repair(repair),
             )
             .await
         }
@@ -383,7 +425,16 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 }
                 Err(e) => println!("error: {e}"),
             }
-            let u = answer.usage;
+            for (i, r) in answer.repairs.iter().enumerate() {
+                println!("repair {} ({}):", i + 1, r.kind.name());
+                for p in &r.problems {
+                    println!("  {}: {}", p.kind, p.message);
+                }
+            }
+            for p in &answer.check_problems {
+                println!("still failing the static check: {}: {}", p.kind, p.message);
+            }
+            let u = answer.total_usage();
             println!(
                 "tokens: in={} out={} cache_read={} cache_write={}  latency: {} ms",
                 u.input_tokens,
@@ -464,7 +515,7 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 std::process::exit(2);
             }
         }
-        Command::IrCoverage | Command::Profile { .. } => {
+        Command::IrCoverage | Command::StaticCheck { .. } | Command::Profile { .. } => {
             unreachable!("handled before choosing a backend")
         }
     }

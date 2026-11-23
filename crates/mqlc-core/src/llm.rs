@@ -12,10 +12,21 @@ pub struct LlmRequest {
     /// backends that support prompt caching cache up to here.
     pub context: String,
     pub user: String,
+    /// Exchanges after that first user turn, oldest first: each a reply of
+    /// the model and what we said back (a repair's feedback).
+    pub turns: Vec<Turn>,
     pub max_tokens: u32,
     pub temperature: f32,
     /// Extended thinking with this budget (Anthropic only).
     pub thinking_budget: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Turn {
+    /// An assistant turn.
+    pub reply: String,
+    /// The user turn after it.
+    pub feedback: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +37,20 @@ pub struct Usage {
     pub cache_read_input_tokens: u64,
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+}
+
+impl std::ops::Add for Usage {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens + other.input_tokens,
+            output_tokens: self.output_tokens + other.output_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens + other.cache_read_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens
+                + other.cache_creation_input_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,21 +218,26 @@ enum BatchResult {
 
 impl AnthropicClient {
     fn params(&self, request: &LlmRequest) -> serde_json::Value {
+        let mut messages = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": request.context,
+                    "cache_control": { "type": "ephemeral" },
+                },
+                { "type": "text", "text": request.user },
+            ],
+        })];
+        for turn in &request.turns {
+            messages.push(serde_json::json!({ "role": "assistant", "content": turn.reply }));
+            messages.push(serde_json::json!({ "role": "user", "content": turn.feedback }));
+        }
         let mut params = serde_json::json!({
             "model": self.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": request.context,
-                        "cache_control": { "type": "ephemeral" },
-                    },
-                    { "type": "text", "text": request.user },
-                ],
-            }],
+            "messages": messages,
         });
         if let Some(budget) = request.thinking_budget {
             params["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
@@ -418,6 +448,10 @@ impl LlmClient for OpenAiClient {
                 0,
                 serde_json::json!({ "role": "system", "content": request.system }),
             );
+        }
+        for turn in &request.turns {
+            messages.push(serde_json::json!({ "role": "assistant", "content": turn.reply }));
+            messages.push(serde_json::json!({ "role": "user", "content": turn.feedback }));
         }
         let body = serde_json::json!({
             "model": self.model,

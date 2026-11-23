@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
@@ -11,7 +11,8 @@ use mongodb::bson::Document;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::{Dataset, DatasetError, Sample, sha256};
-use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Usage, with_retries};
+use crate::ir::{Pipeline, Schema};
+use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Turn, Usage, with_retries};
 use crate::mdl::{MdlError, MdlProject};
 use crate::reply::{ParseError, parse_reply};
 
@@ -21,6 +22,8 @@ const MAX_TOKENS: u32 = 4096;
 pub const DEFAULT_TEMPERATURE: f32 = 0.0;
 const WRITE_STAGES: [&str; 2] = ["$out", "$merge"];
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Repairs of each kind a question gets at most (experiment B).
+pub const MAX_REPAIRS: u32 = 2;
 
 /// Failures that leave no model answer to record.
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +78,74 @@ impl AnswerError {
     }
 }
 
+/// Which errors are fed back to the model for another reply (experiment B).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Repair {
+    #[default]
+    Off,
+    /// An execution error, up to `MAX_REPAIRS` times: the control arm.
+    Execution,
+    /// The IR arm: before a candidate runs, a static check against the
+    /// official schema description, whose errors are repaired up to
+    /// `MAX_REPAIRS` times; a candidate still failing it then runs anyway.
+    /// Execution errors are repaired as in `Execution`, with their own
+    /// `MAX_REPAIRS`.
+    StaticCheck,
+}
+
+impl Repair {
+    /// Execution repairs per question.
+    fn max_repairs(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::Execution | Self::StaticCheck => MAX_REPAIRS,
+        }
+    }
+
+    /// Whether candidates are statically checked: the IR arm.
+    fn checks(self) -> bool {
+        self == Self::StaticCheck
+    }
+
+    fn static_repairs(self) -> u32 {
+        if self.checks() { MAX_REPAIRS } else { 0 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairKind {
+    StaticCheck,
+    Execution,
+}
+
+impl RepairKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::StaticCheck => "static_check",
+            Self::Execution => "execution",
+        }
+    }
+}
+
+/// One error found in a candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Problem {
+    /// `execution`, or a static check's `CheckKind` name.
+    pub kind: String,
+    pub message: String,
+}
+
+/// One repair: what was wrong with the candidate before it, and the reply
+/// the feedback got.
+#[derive(Debug, Clone)]
+pub struct RepairRound {
+    pub kind: RepairKind,
+    pub problems: Vec<Problem>,
+    pub reply: String,
+    pub usage: Usage,
+    pub latency: Duration,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub collection: String,
@@ -83,13 +154,30 @@ pub struct Query {
 
 #[derive(Debug)]
 pub struct Answer {
+    /// The reply to the question; a repaired answer's later replies are in
+    /// `repairs`.
     pub reply: String,
+    /// Of the first call only; repairs have their own.
     pub usage: Usage,
     /// `None` for batch answers, which have no per-request latency.
     pub latency: Option<Duration>,
-    /// `None` when the reply could not be parsed.
+    /// The last candidate's, `None` when it could not be parsed.
     pub query: Option<Query>,
     pub rows: Result<Vec<Document>, AnswerError>,
+    /// In order; the last one's reply is the candidate above.
+    pub repairs: Vec<RepairRound>,
+    /// What the static check still finds in the candidate above, which ran
+    /// anyway once the static repairs were used up.
+    pub check_problems: Vec<Problem>,
+}
+
+impl Answer {
+    /// Every call's usage, repairs included.
+    pub fn total_usage(&self) -> Usage {
+        self.repairs
+            .iter()
+            .fold(self.usage, |total, r| total + r.usage)
+    }
 }
 
 /// Generation settings, recorded in run manifests.
@@ -104,8 +192,13 @@ pub struct Settings {
     pub thinking_budget: Option<u32>,
     /// Only `full` until retrieval lands.
     pub knowledge_mode: String,
-    /// Whether the static-check repair loop is on (not implemented yet).
+    /// Whether candidates are statically checked (and repaired) before they
+    /// run.
     pub ir: bool,
+    /// Repairs of each kind per question; 0 when repair is off. Absent from
+    /// manifests written before repair existed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_repairs: u32,
     /// The system prompt opens the user turn instead of going as the system
     /// prompt (#19). Absent from manifests written before it existed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -178,9 +271,12 @@ pub struct Engine<L> {
     temperature: f32,
     single_message: bool,
     thinking_budget: Option<u32>,
+    repair: Repair,
     /// Rendered MDL per database, loaded once so every prompt of a run
     /// matches the hash in its manifest.
     mdl: Mutex<HashMap<String, String>>,
+    /// The static check's schema per database.
+    schemas: Mutex<HashMap<String, Arc<Schema>>>,
 }
 
 impl<L: LlmClient> Engine<L> {
@@ -193,7 +289,9 @@ impl<L: LlmClient> Engine<L> {
             temperature: DEFAULT_TEMPERATURE,
             single_message: false,
             thinking_budget: None,
+            repair: Repair::Off,
             mdl: Mutex::default(),
+            schemas: Mutex::default(),
         }
     }
 
@@ -221,6 +319,11 @@ impl<L: LlmClient> Engine<L> {
         self
     }
 
+    pub fn with_repair(mut self, repair: Repair) -> Self {
+        self.repair = repair;
+        self
+    }
+
     fn max_tokens(&self) -> u32 {
         MAX_TOKENS + self.thinking_budget.unwrap_or(0)
     }
@@ -244,7 +347,8 @@ impl<L: LlmClient> Engine<L> {
             thinking: self.thinking_budget.is_some(),
             thinking_budget: self.thinking_budget,
             knowledge_mode: "full".to_string(),
-            ir: false,
+            ir: self.repair.checks(),
+            max_repairs: self.repair.max_repairs(),
             single_message: self.single_message,
         }
     }
@@ -256,21 +360,27 @@ impl<L: LlmClient> Engine<L> {
         if let Some(skipped) = self.overflow_answer(&request) {
             return Ok(skipped);
         }
-        let (response, latency) = with_retries(|| async {
+        let (response, latency) = self.call(&request).await?;
+        self.answer(sample, response, Some(latency)).await
+    }
+
+    async fn call(&self, request: &LlmRequest) -> Result<(LlmResponse, Duration), LlmError> {
+        with_retries(|| async {
             let started = Instant::now();
-            let response = self.llm.complete(&request).await?;
+            let response = self.llm.complete(request).await?;
             Ok((response, started.elapsed()))
         })
-        .await?;
-        self.answer(sample, response, Some(latency)).await
+        .await
     }
 
     /// The answer for a request whose prompt, with room for the longest
     /// reply, does not fit the backend's context window; such a request is
     /// not sent (see `estimate_tokens`).
     pub fn overflow_answer(&self, request: &LlmRequest) -> Option<Answer> {
+        let turns = request.turns.iter().flat_map(|t| [&t.reply, &t.feedback]);
         let estimated = [&request.system, &request.context, &request.user]
             .into_iter()
+            .chain(turns)
             .map(|text| estimate_tokens(text))
             .sum();
         let window = self.llm.context_window();
@@ -280,13 +390,15 @@ impl<L: LlmClient> Engine<L> {
             latency: None,
             query: None,
             rows: Err(AnswerError::ContextOverflow { estimated, window }),
+            repairs: Vec::new(),
+            check_problems: Vec::new(),
         })
     }
 
     /// A hash per database of the knowledge the arm sends for it, recorded in
     /// run manifests so a run does not resume on different knowledge: the
     /// schema knowledge as sent, plus each question's evidence for the
-    /// evidence arm.
+    /// evidence arm and the official description the IR arm checks against.
     pub fn knowledge_hashes<'a>(
         &self,
         db_ids: impl IntoIterator<Item = &'a str>,
@@ -303,6 +415,10 @@ impl<L: LlmClient> Engine<L> {
                             sample.sample_id, sample.mongodb_evidence
                         ));
                     }
+                }
+                if self.repair.checks() {
+                    knowledge.push_str("\n\nStatic check:\n");
+                    knowledge.push_str(&self.dataset.schema_description(split, db_id)?);
                 }
                 Ok((db_id.to_string(), sha256(knowledge.as_bytes())))
             })
@@ -376,6 +492,7 @@ impl<L: LlmClient> Engine<L> {
             system,
             context,
             user: prompt.question_block(&sample.question, evidence),
+            turns: Vec::new(),
             max_tokens: self.max_tokens(),
             temperature: self.temperature,
             thinking_budget: self.thinking_budget,
@@ -383,28 +500,80 @@ impl<L: LlmClient> Engine<L> {
     }
 
     /// Parses and executes the reply to `sample`'s request, however it was
-    /// obtained (synchronously or from a batch).
+    /// obtained (synchronously or from a batch), and repairs it as the
+    /// engine's `Repair` says. Repairs are always synchronous calls.
     pub async fn answer(
         &self,
         sample: &Sample,
         response: LlmResponse,
         latency: Option<Duration>,
     ) -> Result<Answer, AskError> {
-        let parsed = if response.truncated {
-            Err(AnswerError::Truncated(self.max_tokens()))
-        } else {
-            parse_reply(&response.text).map_err(AnswerError::from)
-        };
-        let (query, rows) = match parsed {
-            Err(e) => (None, Err(e)),
-            Ok(parsed) => {
-                let query = Query {
-                    collection: parsed.collection,
-                    pipeline: parsed.pipeline,
+        let mut static_left = self.repair.static_repairs();
+        let mut execution_left = self.repair.max_repairs();
+        // Built at the first repair: most answers need none.
+        let mut request: Option<LlmRequest> = None;
+        let mut repairs = Vec::new();
+        let mut text = response.text.clone();
+        let mut truncated = response.truncated;
+        let (query, rows, check_problems) = loop {
+            let candidate = self.parse(&text, truncated);
+            let check_problems = match &candidate {
+                Ok(query) if self.repair.checks() => self.check(sample, query)?,
+                _ => Vec::new(),
+            };
+            // The candidate's outcome, once it has run.
+            let mut ran = None;
+            let (kind, problems) = if !check_problems.is_empty() && static_left > 0 {
+                static_left -= 1;
+                (RepairKind::StaticCheck, check_problems)
+            } else {
+                let (query, rows) = match candidate {
+                    Ok(query) => {
+                        let rows = self.execute(&sample.db_id, &query).await?;
+                        (Some(query), rows)
+                    }
+                    Err(e) => (None, Err(e)),
                 };
-                let rows = self.execute(&sample.db_id, &query).await?;
-                (Some(query), rows)
+                let problem = match &rows {
+                    Err(e @ AnswerError::Mongo(_)) if execution_left > 0 => Problem {
+                        kind: RepairKind::Execution.name().to_string(),
+                        message: e.to_string(),
+                    },
+                    _ => break (query, rows, check_problems),
+                };
+                execution_left -= 1;
+                ran = Some((query, rows, check_problems));
+                (RepairKind::Execution, vec![problem])
+            };
+            if request.is_none() {
+                request = Some(self.request(sample)?);
             }
+            let request = request.as_mut().expect("just built");
+            request.turns.push(Turn {
+                reply: text.clone(),
+                feedback: feedback(kind, &problems),
+            });
+            // No room for another exchange: the candidate stands as it is.
+            if self.overflow_answer(request).is_some() {
+                request.turns.pop();
+                match ran {
+                    Some(outcome) => break outcome,
+                    None => {
+                        (static_left, execution_left) = (0, 0);
+                        continue;
+                    }
+                }
+            }
+            let (repaired, latency) = self.call(request).await?;
+            text = repaired.text.clone();
+            truncated = repaired.truncated;
+            repairs.push(RepairRound {
+                kind,
+                problems,
+                reply: repaired.text,
+                usage: repaired.usage,
+                latency,
+            });
         };
         Ok(Answer {
             reply: response.text,
@@ -412,7 +581,47 @@ impl<L: LlmClient> Engine<L> {
             latency,
             query,
             rows,
+            repairs,
+            check_problems,
         })
+    }
+
+    fn parse(&self, text: &str, truncated: bool) -> Result<Query, AnswerError> {
+        if truncated {
+            return Err(AnswerError::Truncated(self.max_tokens()));
+        }
+        let parsed = parse_reply(text)?;
+        Ok(Query {
+            collection: parsed.collection,
+            pipeline: parsed.pipeline,
+        })
+    }
+
+    /// The static check of `query` against the official description of the
+    /// sample's database.
+    fn check(&self, sample: &Sample, query: &Query) -> Result<Vec<Problem>, AskError> {
+        let schema = {
+            let mut cache = self.schemas.lock().unwrap();
+            match cache.get(&sample.db_id) {
+                Some(schema) => schema.clone(),
+                None => {
+                    let fields = self
+                        .dataset
+                        .official_field_types(&sample.split, &sample.db_id)?;
+                    let schema = Arc::new(Schema::from_official(&fields));
+                    cache.insert(sample.db_id.clone(), schema.clone());
+                    schema
+                }
+            }
+        };
+        Ok(Pipeline::parse(&query.pipeline)
+            .check(&query.collection, &schema)
+            .into_iter()
+            .map(|e| Problem {
+                kind: e.kind.name().to_string(),
+                message: e.message,
+            })
+            .collect())
     }
 
     /// The outer error is the database failing; the inner one is the query
@@ -449,6 +658,28 @@ impl<L: LlmClient> Engine<L> {
             Err(e) => Ok(Err(AnswerError::Mongo(e))),
         }
     }
+}
+
+/// The user turn that asks for a repair.
+fn feedback(kind: RepairKind, problems: &[Problem]) -> String {
+    let what = match kind {
+        RepairKind::StaticCheck => {
+            "The pipeline in your reply does not fit the MongoDB schema description"
+        }
+        RepairKind::Execution => "Running the pipeline in your reply failed",
+    };
+    let list: Vec<String> = problems
+        .iter()
+        .map(|p| format!("- {}", p.message))
+        .collect();
+    format!(
+        "{what}:\n{}\n\nCorrect it and reply with the whole answer again, in the same format.",
+        list.join("\n")
+    )
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Tokens of prompt text, at 3 bytes a token. That overestimates (English

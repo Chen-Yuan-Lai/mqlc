@@ -12,8 +12,9 @@ Records skipped for a context overflow (the prompt was never sent) are neither
 right nor wrong: they are left out of all three shares and counted apart.
 
 Writes `scores.jsonl` (one line per record) and `summary.json` (overall, by
-split and by database, plus what the run cost) into the run directory, and
-prints the summary. `compare.py` compares two scored runs question by question.
+split and by database, plus what the run cost and what was repaired) into the
+run directory, and prints the summary. `compare.py` compares two scored runs
+question by question.
 
     uv run --project scoring scoring/score.py runs/<name>
 """
@@ -101,6 +102,43 @@ def percentages(scores: list[dict]) -> dict:
             "soft_ex": share("soft_ex"), "strict_ex": share("strict_ex")}
 
 
+def repair_report(records: list[dict], scores: list[dict]) -> dict:
+    """Experiment B: what errors were fed back for a repair (per kind of
+    repair), what the repairs cost, and how the repaired samples scored."""
+    repaired = [(r, s) for r, s in zip(records, scores) if r.get("repairs")]
+    rounds, errors, samples_by_error, still_failing = (
+        defaultdict(int), defaultdict(lambda: defaultdict(int)), defaultdict(int), defaultdict(int))
+    tokens = {k: 0 for k in ("input_tokens", "output_tokens",
+                             "cache_read_input_tokens", "cache_creation_input_tokens")}
+    cost = 0.0
+    for r, _ in repaired:
+        seen = set()
+        for rep in r["repairs"]:
+            rounds[rep["kind"]] += 1
+            for e in rep["errors"]:
+                errors[rep["kind"]][e["kind"]] += 1
+                seen.add(e["kind"])
+            for k in tokens:
+                tokens[k] += rep["usage"].get(k, 0)
+            cost += rep.get("cost_usd") or 0
+        for kind in seen:
+            samples_by_error[kind] += 1
+    for r in records:
+        for kind in {e["kind"] for e in r.get("check_errors", [])}:
+            still_failing[kind] += 1
+    scored = [s for _, s in repaired if not s["skipped"]]
+    return {
+        "samples": len(repaired),
+        "rounds": dict(sorted(rounds.items(), key=lambda kv: kv[0] != "static_check")),
+        "errors": {kind: dict(sorted(by.items())) for kind, by in errors.items()},
+        "samples_by_error": dict(sorted(samples_by_error.items())),
+        "still_failing_check": dict(sorted(still_failing.items())),
+        "tokens": tokens,
+        "cost_usd": cost,
+        "soft_ex": 100 * sum(s["soft_ex"] for s in scored) / len(scored) if scored else None,
+    }
+
+
 def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
     ev = load_eval_script(data_dir)
     samples = {s["sample_id"]: s
@@ -119,6 +157,7 @@ def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
         "cost_usd": sum(r.get("cost_usd") or 0 for r in records),
         "by_split": {split: percentages(rows) for split, rows in sorted(by_split.items())},
         "by_db": {db: percentages(rows) for db, rows in sorted(by_db.items())},
+        "repairs": repair_report(records, scores),
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
@@ -140,6 +179,16 @@ def main() -> None:
         print(f"{db:<26}{s['samples']:>5}{s[SKIPPED]:>9}{s['exec_rate']:>10.2f}%"
               f"{s['soft_ex']:>8.2f}%{s['strict_ex']:>10.2f}%")
     print(f"cost ${summary['cost_usd']:.4f}")
+    repairs = summary["repairs"]
+    if repairs["samples"]:
+        print(f"\nrepaired {repairs['samples']} samples (Soft-EX {repairs['soft_ex']:.2f}% after), "
+              f"repairs cost ${repairs['cost_usd']:.4f}")
+        for kind, n in repairs["rounds"].items():
+            by_error = ", ".join(f"{e} {c}" for e, c in repairs["errors"][kind].items())
+            print(f"  {kind:<13}{n:>6} rounds  errors fed back: {by_error}")
+        if repairs["still_failing_check"]:
+            print("  run while still failing the static check: " + ", ".join(
+                f"{e} {c}" for e, c in repairs["still_failing_check"].items()))
 
 
 if __name__ == "__main__":

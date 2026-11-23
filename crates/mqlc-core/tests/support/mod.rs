@@ -69,6 +69,22 @@ pub fn dataset_dir() -> TempDir {
     dir
 }
 
+/// Replaces the official description of one collection of `DB_ID` (in dev).
+pub fn describe(data: &Path, collection: &str, fields: &[&str]) {
+    write(
+        data,
+        &format!("databases/dev/{DB_ID}/collections_description/{collection}.jsonl"),
+        &fields.join("\n"),
+    );
+}
+
+/// A line of an official description.
+pub fn field(name: &str, data_type: &str) -> String {
+    format!(
+        r#"{{"field_name": "{name}", "field_description": "", "data_type": "{data_type}", "required": true, "value_description": ""}}"#
+    )
+}
+
 fn write(root: &Path, rel: &str, content: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

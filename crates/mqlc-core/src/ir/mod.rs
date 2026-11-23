@@ -10,15 +10,19 @@
 //! The operators below are the ones the train split's gold pipelines use, and
 //! no others (ADR 0006): a stage using any other operator stays raw.
 
+mod check;
 mod coverage;
 mod emit;
+mod gold;
 mod parse;
 
 use std::collections::BTreeSet;
 
 use mongodb::bson::{Bson, Document};
 
+pub use check::{CheckError, CheckKind, Schema, ValueType};
 pub use coverage::{Coverage, CoverageError, SplitCoverage};
+pub use gold::GoldCheck;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum IrError {
@@ -52,6 +56,29 @@ pub enum Stage {
     Skip(Integer),
     SetWindowFields(SetWindowFields),
     Raw(RawStage),
+}
+
+impl Stage {
+    /// The stage's name as written, `$match`, ...
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Match(_) => "$match",
+            Self::Project(_) => "$project",
+            Self::Unwind(_) => "$unwind",
+            Self::Group(_) => "$group",
+            Self::Sort(_) => "$sort",
+            Self::Lookup(_) => "$lookup",
+            Self::Limit(_) => "$limit",
+            Self::Count(_) => "$count",
+            Self::AddFields(_) => "$addFields",
+            Self::Facet(_) => "$facet",
+            Self::ReplaceRoot(_) => "$replaceRoot",
+            Self::UnionWith(_) => "$unionWith",
+            Self::Skip(_) => "$skip",
+            Self::SetWindowFields(_) => "$setWindowFields",
+            Self::Raw(raw) => raw.document.keys().next().map_or("?", String::as_str),
+        }
+    }
 }
 
 /// A `$limit` or `$skip` count, in the integer type it was written in.

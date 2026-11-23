@@ -12,7 +12,7 @@ use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::Sample;
-use crate::engine::{Answer, AskError, Engine, Settings};
+use crate::engine::{Answer, AskError, Engine, Problem, Settings};
 use crate::llm::{ANTHROPIC_CONTEXT_WINDOW, BatchPoll, LlmClient, LlmRequest, Usage, with_retries};
 use crate::pricing;
 
@@ -70,21 +70,45 @@ pub struct Record {
     pub pipeline: Option<serde_json::Value>,
     pub row_count: Option<usize>,
     pub error: Option<RecordError>,
+    /// Every call's, repairs included.
     pub usage: Usage,
     /// `None` for batch answers.
     pub latency_ms: Option<u64>,
     /// Answered through the batch API, at its discount.
     #[serde(default)]
     pub batch: bool,
+    /// Every call's, repairs included.
     pub cost_usd: Option<f64>,
+    /// The reply to the question. When repaired, `collection`, `pipeline`,
+    /// `row_count` and `error` are of the last repair's reply.
     pub reply: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repairs: Vec<RepairRecord>,
+    /// What the static check still found in the pipeline, which ran anyway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_errors: Vec<RecordError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordError {
-    /// `truncated`, `parse`, `write_stage` or `execution`.
+    /// `truncated`, `parse`, `write_stage` or `execution`; for a static
+    /// check, `unknown_collection`, `unknown_field`, `type_mismatch` or
+    /// `unwind_non_array`.
     pub kind: String,
     pub message: String,
+}
+
+/// One repair: the errors fed back, and the reply they got. Always a
+/// synchronous call, at the full price.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepairRecord {
+    /// `static_check` or `execution`.
+    pub kind: String,
+    pub errors: Vec<RecordError>,
+    pub usage: Usage,
+    pub latency_ms: u64,
+    pub cost_usd: Option<f64>,
+    pub reply: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -431,6 +455,39 @@ impl<F: FnMut(Progress)> Recorder<F> {
     }
 
     fn write(&mut self, sample: &Sample, answer: Answer, batch: bool) -> Result<(), BenchError> {
+        let problems = |problems: &[Problem]| -> Vec<RecordError> {
+            problems
+                .iter()
+                .map(|p| RecordError {
+                    kind: p.kind.clone(),
+                    message: p.message.clone(),
+                })
+                .collect()
+        };
+        let repairs: Vec<RepairRecord> = answer
+            .repairs
+            .iter()
+            .map(|r| RepairRecord {
+                kind: r.kind.name().to_string(),
+                errors: problems(&r.problems),
+                usage: r.usage,
+                latency_ms: r.latency.as_millis() as u64,
+                cost_usd: pricing::cost_usd(&self.model, &r.usage, false),
+                reply: r.reply.clone(),
+            })
+            .collect();
+        // Nothing used costs nothing, priced model or not (a prompt that
+        // was never sent).
+        let first_cost = if answer.usage == Usage::default() {
+            Some(0.0)
+        } else {
+            pricing::cost_usd(&self.model, &answer.usage, batch)
+        };
+        let cost_usd = first_cost.and_then(|first| {
+            repairs
+                .iter()
+                .try_fold(first, |total, r| Some(total + r.cost_usd?))
+        });
         let record = Record {
             arm: self.arm.clone(),
             model: self.model.clone(),
@@ -447,17 +504,13 @@ impl<F: FnMut(Progress)> Recorder<F> {
                 kind: e.kind().to_string(),
                 message: e.to_string(),
             }),
-            usage: answer.usage,
+            usage: answer.total_usage(),
             latency_ms: answer.latency.map(|l| l.as_millis() as u64),
             batch,
-            // Nothing used costs nothing, priced model or not (a prompt that
-            // was never sent).
-            cost_usd: if answer.usage == Usage::default() {
-                Some(0.0)
-            } else {
-                pricing::cost_usd(&self.model, &answer.usage, batch)
-            },
+            cost_usd,
+            check_errors: problems(&answer.check_problems),
             reply: answer.reply,
+            repairs,
         };
         // One write per line, flushed, so a kill loses at most the line in flight.
         let mut line = serde_json::to_string(&record).expect("records serialize");
