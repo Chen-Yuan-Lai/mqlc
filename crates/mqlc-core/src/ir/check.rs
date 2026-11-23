@@ -277,6 +277,35 @@ impl Shape {
         Ok(types)
     }
 
+    /// Whether `path` goes through an array: in an expression its value is
+    /// then an array of what it reaches in each element (in a query it
+    /// matches each element instead).
+    fn through_array(&self, path: &str) -> bool {
+        let parts: Vec<&str> = path.split('.').collect();
+        (1..parts.len()).any(|end| {
+            let indexed = parts[end].parse::<usize>().is_ok();
+            !indexed
+                && self
+                    .fields
+                    .get(&parts[..end].join("."))
+                    .is_some_and(|t| t.as_ref().is_some_and(|t| t.contains(&ValueType::Array)))
+        })
+    }
+
+    /// What `$path` evaluates to in an expression, as `subtree` entries.
+    fn value_of(&self, path: &str) -> Vec<(String, Types)> {
+        if self.through_array(path) {
+            vec![(String::new(), one(ValueType::Array))]
+        } else {
+            self.subtree(path)
+        }
+    }
+
+    /// The types of `$path` in an expression.
+    fn value_types(&self, path: &str) -> Types {
+        self.value_of(path).swap_remove(0).1
+    }
+
     /// `path` and everything under it, as `(suffix, types)` with suffix `""`
     /// for `path` itself and `".b"` for `path.b`.
     fn subtree(&self, path: &str) -> Vec<(String, Types)> {
@@ -606,10 +635,19 @@ impl Checker<'_> {
             } => (path, include_array_index.as_ref()),
         };
         let types = self.field(&shape, path);
-        if let Some(t) = types.as_ref().filter(|t| !t.contains(&ValueType::Array)) {
+        let through_array = shape.through_array(path);
+        if let Some(t) = types
+            .as_ref()
+            .filter(|t| !through_array && !t.contains(&ValueType::Array))
+        {
             self.report(
                 CheckKind::UnwindNonArray,
-                format!("`$unwind` needs an array, but `{path}` is {}", describe(t)),
+                format!(
+                    "`$unwind` on `{path}`, which is {} and never an array, passes each document \
+                     through unchanged: drop it, or if you took `{path}` for an array, rethink \
+                     the stages that rely on that",
+                    describe(t)
+                ),
             );
         }
         let mut out = shape.clone();
@@ -643,7 +681,7 @@ impl Checker<'_> {
     /// What an expression evaluates to, as `Shape::subtree` entries.
     fn value(&self, e: &Expr, shape: &Shape) -> Vec<(String, Types)> {
         match e {
-            Expr::Path(p) => shape.subtree(p),
+            Expr::Path(p) => shape.value_of(p),
             Expr::Object(fields) => {
                 let mut entries = vec![(String::new(), one(ValueType::Document))];
                 for (key, e) in fields {
@@ -757,7 +795,7 @@ impl Checker<'_> {
             (Eq | Ne | Gt | Gte | Lt | Lte, Expr::Array(pair)) if pair.len() == 2 => {
                 match (&pair[0], &pair[1]) {
                     (Expr::Path(p), Expr::Literal(v)) | (Expr::Literal(v), Expr::Path(p)) => {
-                        let types = shape.resolve(p).unwrap_or(None);
+                        let types = shape.value_types(p);
                         self.compare(p, &types, v);
                     }
                     _ => {}
@@ -787,7 +825,10 @@ impl Checker<'_> {
 
     fn date_operand(&mut self, op: ExprOp, e: &Expr, shape: &Shape) {
         let Expr::Path(p) = e else { return };
-        let Ok(Some(types)) = shape.resolve(p) else {
+        if shape.resolve(p).is_err() {
+            return;
+        }
+        let Some(types) = shape.value_types(p) else {
             return;
         };
         if !types.contains(&ValueType::Date) && !types.contains(&ValueType::Array) {
@@ -807,7 +848,7 @@ impl Checker<'_> {
 fn type_of(e: &Expr, shape: &Shape) -> Types {
     use ExprOp::*;
     match e {
-        Expr::Path(p) => shape.resolve(p).unwrap_or(None),
+        Expr::Path(p) => shape.value_types(p),
         Expr::Variable(_) => None,
         Expr::Literal(v) => ValueType::of(v).map(|k| BTreeSet::from([k])),
         Expr::Array(_) => one(ValueType::Array),

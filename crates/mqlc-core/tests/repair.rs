@@ -39,6 +39,11 @@ async fn an_execution_error_is_fed_back_and_the_corrected_pipeline_answers() {
     assert_eq!(answer.rows.unwrap(), vec![doc! { "count": 2 }]);
     assert_eq!(answer.repairs.len(), 1);
     assert_eq!(answer.repairs[0].kind, RepairKind::Execution);
+    // The server's name for the error, to tell execution errors apart.
+    assert_eq!(
+        answer.repairs[0].problems[0].code.as_deref(),
+        Some("Location40324")
+    );
     let requests = engine.llm().requests();
     assert_eq!(requests.len(), 2);
     // The same prompt, then the rejected reply and why it was rejected.
@@ -243,6 +248,8 @@ async fn unwinding_a_field_that_is_not_an_array_is_fed_back() {
     let problem = only_problem(&answer);
     assert_eq!(problem.kind, "unwind_non_array");
     assert!(problem.message.contains("owner"), "{}", problem.message);
+    // MongoDB unwinds a non-array as one element: the feedback says so.
+    assert!(problem.message.contains("unchanged"), "{}", problem.message);
     assert_eq!(answer.rows.unwrap(), vec![doc! { "count": 3 }]);
 }
 
@@ -284,6 +291,7 @@ async fn fields_are_followed_through_lookups_unwinds_groups_and_projections() {
 
     assert!(answer.repairs.is_empty(), "{:?}", answer.repairs);
     assert_eq!(requests.len(), 1);
+    assert!(answer.unchecked.is_empty());
     assert_eq!(
         answer.rows.unwrap(),
         vec![
@@ -303,6 +311,8 @@ async fn fields_after_a_stage_the_ir_cannot_represent_are_not_checked() {
 
     assert!(answer.repairs.is_empty(), "{:?}", answer.repairs);
     assert_eq!(requests.len(), 1);
+    // As `ir-coverage` counts it: the stage, and the operator unknown anywhere.
+    assert_eq!(answer.unchecked, ["$sample stage", "$sample"]);
 }
 
 #[tokio::test]
@@ -405,4 +415,18 @@ async fn a_field_the_description_types_only_as_null_is_not_type_checked() {
     let answer = engine.ask(&sample).await.unwrap();
 
     assert!(answer.repairs.is_empty(), "{:?}", answer.repairs);
+}
+
+#[tokio::test]
+async fn a_path_through_an_array_of_documents_is_an_array_in_an_expression() {
+    // `$visits.vet` is every visit's vet: an array of strings to unwind.
+    let (answer, requests) = ask_checked(&[reply(
+        "animals",
+        r#"[{"$project": {"vets": "$visits.vet"}}, {"$unwind": "$vets"}, {"$count": "count"}]"#,
+    )])
+    .await;
+
+    assert!(answer.repairs.is_empty(), "{:?}", answer.repairs);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(answer.rows.unwrap(), vec![doc! { "count": 3 }]);
 }

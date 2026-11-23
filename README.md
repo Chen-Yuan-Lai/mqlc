@@ -372,22 +372,31 @@ prompt): a field path the documents at that stage do not have
 (`unknown_field`), a collection the description does not list
 (`unknown_collection`), a value compared with a field that never holds its
 type, such as a `Date` with a string (`type_mismatch`), and `$unwind` on a
-field that is never an array (`unwind_non_array`). A field described as a
-document or array with nothing under it, and everything after a raw stage,
-is not checked. A pipeline still failing the check after two repairs runs
+field that is never an array (`unwind_non_array`; MongoDB passes such a
+document through unchanged, and the feedback says so). A field described as
+a document or array with nothing under it, and everything after a stage or
+operator the IR does not know, is not checked; each IR-arm record lists those
+constructs (`unchecked`). A pipeline still failing the check after two repairs runs
 anyway. Repairs are synchronous calls even in batch mode, at the full price.
 Each record lists its repairs (`repairs`: the errors fed back, the reply,
 tokens and cost) and what the check still found (`check_errors`); its
-`usage` and `cost_usd` include the repairs. `score.py` adds a `repairs`
-section to `summary.json`: rounds and errors fed back per kind, the samples
-each error was fed back for, repair tokens and cost, and the Soft-EX of the
-repaired samples.
+`usage` and `cost_usd` include the repairs, and an execution error carries
+the server's name for it (`code`, such as `TypeMismatch`). `score.py` adds
+to `summary.json` the final errors by kind (`errors`, execution errors by
+code), a `repairs` section (rounds and errors fed back per kind, execution
+errors by code, the samples each error was fed back for, repair tokens and
+cost, and the Soft-EX of the repaired samples) and, for the IR arm, a
+`static_check` section (the share of candidates the check read in full, and
+what it could not read).
 
 ```bash
 cargo run -p mqlc -- static-check    # train gold pipelines; anything flagged is a false positive
 ```
 
-On the 1,762 train gold pipelines the check reports nothing.
+On the 1,762 train gold pipelines the check reports nothing. The IR knows the
+train gold pipelines' operators only (ADR 0003): in earlier train runs,
+93.7% (official) and 94.8% (`official-auto-mdl`) of the model's pipelines
+needed no raw stage, the rest mostly for `$regex` with `$options`.
 
 ### IR coverage
 

@@ -1026,6 +1026,12 @@ async fn a_repaired_answer_records_each_repair_and_costs_every_call() {
     assert_eq!(kinds, ["static_check", "execution"]);
     assert_eq!(repaired.repairs[0].errors[0].kind, "unknown_field");
     assert_eq!(repaired.repairs[1].errors[0].kind, "execution");
+    assert_eq!(
+        repaired.repairs[1].errors[0].code.as_deref(),
+        Some("Location40324")
+    );
+    // The IR arm records what its check could not read, here nothing.
+    assert!(repaired.unchecked.is_empty());
     assert_eq!(repaired.repairs[1].usage, usage);
     assert!((repaired.repairs[1].cost_usd.unwrap() - per_call).abs() < 1e-12);
     assert!(records[1].repairs.is_empty());

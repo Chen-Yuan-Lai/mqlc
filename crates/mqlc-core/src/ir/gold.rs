@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use super::{CheckKind, Pipeline, Schema};
-use crate::{Dataset, DatasetError, Sample};
+use crate::{Dataset, DatasetError};
 
-/// Errors that a gold pipeline is not valid Extended JSON are reported by
-/// `Coverage`; such samples are skipped here.
+/// Train only: tuning the check on dev would leak (ADR 0006). Gold
+/// pipelines that are not valid Extended JSON are reported by `Coverage` and
+/// skipped here.
 #[derive(Debug, Default)]
 pub struct GoldCheck {
     pub samples: usize,
@@ -16,19 +17,34 @@ pub struct GoldCheck {
     pub flagged: usize,
     /// Samples per kind of error.
     pub by_kind: BTreeMap<CheckKind, usize>,
-    /// Samples per database.
-    pub by_db: BTreeMap<String, (usize, usize)>,
-    /// Every error, by sample id.
-    pub errors: Vec<(String, String)>,
+    pub by_db: BTreeMap<String, DbCount>,
+    /// Every error, in sample order.
+    pub errors: Vec<GoldError>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DbCount {
+    pub samples: usize,
+    pub flagged: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoldError {
+    pub sample_id: String,
+    pub kind: CheckKind,
+    pub message: String,
 }
 
 impl GoldCheck {
-    pub fn of<'a>(
-        dataset: &Dataset,
-        samples: impl IntoIterator<Item = &'a Sample>,
-    ) -> Result<Self, DatasetError> {
+    /// Every train question, or only those on `db_id`.
+    pub fn of(dataset: &Dataset, db_id: Option<&str>) -> Result<Self, DatasetError> {
         let mut report = Self::default();
         let mut schemas: BTreeMap<String, Schema> = BTreeMap::new();
+        let samples = dataset
+            .samples()
+            .iter()
+            .filter(|s| s.split == "train")
+            .filter(|s| db_id.is_none_or(|db| s.db_id == db));
         for sample in samples {
             let Ok(pipeline) = Pipeline::from_extended_json(&sample.mql.aggregation_pipeline)
             else {
@@ -41,23 +57,23 @@ impl GoldCheck {
             let errors = pipeline.check(&sample.mql.collection, &schemas[&sample.db_id]);
             report.samples += 1;
             let db = report.by_db.entry(sample.db_id.clone()).or_default();
-            db.0 += 1;
+            db.samples += 1;
             if errors.is_empty() {
                 continue;
             }
             report.flagged += 1;
-            db.1 += 1;
+            db.flagged += 1;
             let mut kinds: Vec<CheckKind> = errors.iter().map(|e| e.kind).collect();
             kinds.sort();
             kinds.dedup();
             for kind in kinds {
                 *report.by_kind.entry(kind).or_default() += 1;
             }
-            report.errors.extend(
-                errors
-                    .into_iter()
-                    .map(|e| (sample.sample_id.clone(), format!("[{}] {e}", e.kind.name()))),
-            );
+            report.errors.extend(errors.into_iter().map(|e| GoldError {
+                sample_id: sample.sample_id.clone(),
+                kind: e.kind,
+                message: e.message,
+            }));
         }
         Ok(report)
     }
@@ -68,7 +84,7 @@ impl fmt::Display for GoldCheck {
         let pct = |n: usize, of: usize| 100.0 * n as f64 / of.max(1) as f64;
         writeln!(
             f,
-            "Static check on gold pipelines: {} of {} samples flagged ({:.1}%), all false positives",
+            "Static check on train gold pipelines: {} of {} samples flagged ({:.1}%), all false positives",
             self.flagged,
             self.samples,
             pct(self.flagged, self.samples)
@@ -80,13 +96,13 @@ impl fmt::Display for GoldCheck {
         }
         writeln!(f)?;
         writeln!(f, "{:<26}{:>9}{:>9}", "database", "samples", "flagged")?;
-        for (db, (n, flagged)) in &self.by_db {
-            writeln!(f, "{db:<26}{n:>9}{flagged:>9}")?;
+        for (db, count) in &self.by_db {
+            writeln!(f, "{db:<26}{:>9}{:>9}", count.samples, count.flagged)?;
         }
         writeln!(f)?;
         writeln!(f, "Errors:")?;
-        for (sample_id, error) in &self.errors {
-            writeln!(f, "  {sample_id}  {error}")?;
+        for e in &self.errors {
+            writeln!(f, "  {}  [{}] {}", e.sample_id, e.kind.name(), e.message)?;
         }
         Ok(())
     }

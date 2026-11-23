@@ -12,7 +12,8 @@ Records skipped for a context overflow (the prompt was never sent) are neither
 right nor wrong: they are left out of all three shares and counted apart.
 
 Writes `scores.jsonl` (one line per record) and `summary.json` (overall, by
-split and by database, plus what the run cost and what was repaired) into the
+split and by database, plus what the run cost, its errors by kind, what was
+repaired and how much of each pipeline the static check could read) into the
 run directory, and prints the summary. `compare.py` compares two scored runs
 question by question.
 
@@ -106,8 +107,9 @@ def repair_report(records: list[dict], scores: list[dict]) -> dict:
     """Experiment B: what errors were fed back for a repair (per kind of
     repair), what the repairs cost, and how the repaired samples scored."""
     repaired = [(r, s) for r, s in zip(records, scores) if r.get("repairs")]
-    rounds, errors, samples_by_error, still_failing = (
-        defaultdict(int), defaultdict(lambda: defaultdict(int)), defaultdict(int), defaultdict(int))
+    rounds, errors, samples_by_error, still_failing, codes = (
+        defaultdict(int), defaultdict(lambda: defaultdict(int)), defaultdict(int), defaultdict(int),
+        defaultdict(int))
     tokens = {k: 0 for k in ("input_tokens", "output_tokens",
                              "cache_read_input_tokens", "cache_creation_input_tokens")}
     cost = 0.0
@@ -118,6 +120,8 @@ def repair_report(records: list[dict], scores: list[dict]) -> dict:
             for e in rep["errors"]:
                 errors[rep["kind"]][e["kind"]] += 1
                 seen.add(e["kind"])
+                if e.get("code"):
+                    codes[e["code"]] += 1
             for k in tokens:
                 tokens[k] += rep["usage"].get(k, 0)
             cost += rep.get("cost_usd") or 0
@@ -136,6 +140,38 @@ def repair_report(records: list[dict], scores: list[dict]) -> dict:
         "tokens": tokens,
         "cost_usd": cost,
         "soft_ex": 100 * sum(s["soft_ex"] for s in scored) / len(scored) if scored else None,
+        "execution_codes": dict(sorted(codes.items())),
+    }
+
+
+def error_counts(records: list[dict]) -> dict:
+    """The final error of each record by kind, execution errors by the
+    server's name for them (`execution:TypeMismatch`)."""
+    counts = defaultdict(int)
+    for r in records:
+        e = r.get("error")
+        if e and e["kind"] != SKIPPED:
+            counts[f"{e['kind']}:{e['code']}" if e.get("code") else e["kind"]] += 1
+    return dict(sorted(counts.items()))
+
+
+def check_report(run_dir: Path, records: list[dict]) -> dict | None:
+    """For a run with the static check on (the IR arm): how many candidates
+    it could read in full, and for how many each construct it cannot read
+    left the rest unchecked."""
+    manifest = run_dir / "manifest.json"
+    if not manifest.exists() or not json.loads(manifest.read_text())["config"].get("ir"):
+        return None
+    candidates = [r for r in records if r.get("pipeline") is not None]
+    unchecked = defaultdict(int)
+    for r in candidates:
+        for construct in r.get("unchecked", []):
+            unchecked[construct] += 1
+    full = sum(1 for r in candidates if not r.get("unchecked"))
+    return {
+        "candidates": len(candidates),
+        "fully_checked": 100 * full / len(candidates) if candidates else 0.0,
+        "unchecked": dict(sorted(unchecked.items(), key=lambda kv: (-kv[1], kv[0]))),
     }
 
 
@@ -157,7 +193,9 @@ def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
         "cost_usd": sum(r.get("cost_usd") or 0 for r in records),
         "by_split": {split: percentages(rows) for split, rows in sorted(by_split.items())},
         "by_db": {db: percentages(rows) for db, rows in sorted(by_db.items())},
+        "errors": error_counts(records),
         "repairs": repair_report(records, scores),
+        "static_check": check_report(run_dir, records),
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
@@ -179,6 +217,11 @@ def main() -> None:
         print(f"{db:<26}{s['samples']:>5}{s[SKIPPED]:>9}{s['exec_rate']:>10.2f}%"
               f"{s['soft_ex']:>8.2f}%{s['strict_ex']:>10.2f}%")
     print(f"cost ${summary['cost_usd']:.4f}")
+    if summary["static_check"]:
+        c = summary["static_check"]
+        top = ", ".join(f"{k} {n}" for k, n in list(c["unchecked"].items())[:8])
+        print(f"static check read {c['fully_checked']:.1f}% of {c['candidates']} candidates in full"
+              + (f"; unread: {top}" if top else ""))
     repairs = summary["repairs"]
     if repairs["samples"]:
         print(f"\nrepaired {repairs['samples']} samples (Soft-EX {repairs['soft_ex']:.2f}% after), "
@@ -186,6 +229,9 @@ def main() -> None:
         for kind, n in repairs["rounds"].items():
             by_error = ", ".join(f"{e} {c}" for e, c in repairs["errors"][kind].items())
             print(f"  {kind:<13}{n:>6} rounds  errors fed back: {by_error}")
+        if repairs["execution_codes"]:
+            print("  execution errors fed back: " + ", ".join(
+                f"{c} {n}" for c, n in repairs["execution_codes"].items()))
         if repairs["still_failing_check"]:
             print("  run while still failing the static check: " + ", ".join(
                 f"{e} {c}" for e, c in repairs["still_failing_check"].items()))

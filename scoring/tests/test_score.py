@@ -117,9 +117,10 @@ def test_scores_a_run_with_official_soft_ex_strict_ex_and_exec_rate(
     assert json.loads((run / "summary.json").read_text()) == summary
 
 
-def repair(kind, errors, cost_usd, input_tokens=100, output_tokens=10):
+def repair(kind, errors, cost_usd, input_tokens=100, output_tokens=10, code=None):
     return {
-        "kind": kind, "errors": [{"kind": k, "message": "..."} for k in errors],
+        "kind": kind,
+        "errors": [{"kind": k, "message": "..."} | ({"code": code} if code else {}) for k in errors],
         "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens,
                   "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
         "latency_ms": 5, "cost_usd": cost_usd, "reply": "",
@@ -137,19 +138,23 @@ def test_reports_what_was_repaired_what_it_cost_and_how_the_repaired_samples_sco
         record("dev_2", names, cost_usd=0.4) | {"repairs": [
             repair("static_check", ["unknown_field", "type_mismatch"], 0.1),
             repair("static_check", ["unknown_field"], 0.1),
-            repair("execution", ["execution"], 0.1, input_tokens=200),
+            repair("execution", ["execution"], 0.1, input_tokens=200, code="TypeMismatch"),
         ]},
         # Repaired, still wrong, and run while still failing the check.
         record("dev_3", [{"$match": {"species": "dog"}}, {"$project": {"_id": 0, "name": 1}}],
                cost_usd=0.2) | {
             "repairs": [repair("static_check", ["unwind_non_array"], 0.1)],
             "check_errors": [{"kind": "unwind_non_array", "message": "..."}],
+            "unchecked": ["$regex", "$options"],
         },
-        record("dev_4", names, cost_usd=0.1),
+        record("dev_4", names, cost_usd=0.1) | {"unchecked": ["$regex"]},
+        record("train_1", error={"kind": "execution", "code": "BadValue", "message": "..."}),
     ]
+    (run / "manifest.json").write_text(json.dumps({"config": {"ir": True}, "invocations": []}))
     (run / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
 
-    repairs = score.score_run(run, data_dir, mongo_uri)["repairs"]
+    summary = score.score_run(run, data_dir, mongo_uri)
+    repairs = summary["repairs"]
 
     assert repairs["samples"] == 2
     assert repairs["rounds"] == {"static_check": 3, "execution": 1}
@@ -166,6 +171,14 @@ def test_reports_what_was_repaired_what_it_cost_and_how_the_repaired_samples_sco
                                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
     assert repairs["cost_usd"] == pytest.approx(0.4)
     assert repairs["soft_ex"] == pytest.approx(50)
+    # Execution errors told apart by the server's name for them.
+    assert repairs["execution_codes"] == {"TypeMismatch": 1}
+    assert summary["errors"] == {"execution:BadValue": 1}
+    # The IR arm: how many candidates the check could read in full.
+    checked = summary["static_check"]
+    assert checked["candidates"] == 3
+    assert checked["fully_checked"] == pytest.approx(100 / 3)
+    assert checked["unchecked"] == {"$regex": 2, "$options": 1}
 
 
 def test_a_run_without_repairs_reports_none(tmp_path, data_dir, mongo_uri):
@@ -174,8 +187,12 @@ def test_a_run_without_repairs_reports_none(tmp_path, data_dir, mongo_uri):
     names = [{"$match": {"species": "cat"}}, {"$project": {"_id": 0, "name": 1}}]
     (run / "results.jsonl").write_text(json.dumps(record("dev_2", names)) + "\n")
 
-    repairs = score.score_run(run, data_dir, mongo_uri)["repairs"]
+    summary = score.score_run(run, data_dir, mongo_uri)
+    repairs = summary["repairs"]
 
     assert repairs["samples"] == 0
     assert repairs["rounds"] == {}
     assert repairs["soft_ex"] is None
+    assert repairs["execution_codes"] == {}
+    # No manifest saying the check was on: nothing to say about it.
+    assert summary["static_check"] is None

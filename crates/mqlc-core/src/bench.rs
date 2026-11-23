@@ -87,6 +87,10 @@ pub struct Record {
     /// What the static check still found in the pipeline, which ran anyway.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_errors: Vec<RecordError>,
+    /// Under the IR arm, the stages, operators and forms of the pipeline
+    /// that the static check could not read, so did not check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchecked: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,6 +99,10 @@ pub struct RecordError {
     /// check, `unknown_collection`, `unknown_field`, `type_mismatch` or
     /// `unwind_non_array`.
     pub kind: String,
+    /// For `execution`, the server's name for the error (`TypeMismatch`,
+    /// ...). Absent from records written before #12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     pub message: String,
 }
 
@@ -460,6 +468,7 @@ impl<F: FnMut(Progress)> Recorder<F> {
                 .iter()
                 .map(|p| RecordError {
                     kind: p.kind.clone(),
+                    code: p.code.clone(),
                     message: p.message.clone(),
                 })
                 .collect()
@@ -502,6 +511,7 @@ impl<F: FnMut(Progress)> Recorder<F> {
             row_count: answer.rows.as_ref().ok().map(Vec::len),
             error: answer.rows.as_ref().err().map(|e| RecordError {
                 kind: e.kind().to_string(),
+                code: e.code(),
                 message: e.to_string(),
             }),
             usage: answer.total_usage(),
@@ -509,6 +519,7 @@ impl<F: FnMut(Progress)> Recorder<F> {
             batch,
             cost_usd,
             check_errors: problems(&answer.check_problems),
+            unchecked: answer.unchecked,
             reply: answer.reply,
             repairs,
         };

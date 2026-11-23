@@ -257,12 +257,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if let Command::StaticCheck { db } = &cli.command {
-        let samples = dataset
-            .samples()
-            .iter()
-            .filter(|s| s.split == "train")
-            .filter(|s| db.as_ref().is_none_or(|db| &s.db_id == db));
-        print!("{}", ir::GoldCheck::of(&dataset, samples)?);
+        print!("{}", ir::GoldCheck::of(&dataset, db.as_deref())?);
         return Ok(());
     }
     let mongo = mqlc_core::mongodb::Client::with_uri_str(&cli.mongo_uri).await?;

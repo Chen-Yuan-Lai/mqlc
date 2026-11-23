@@ -1,6 +1,6 @@
 //! The single-question API: question → prompt → LLM → pipeline → rows.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -76,6 +76,18 @@ impl AnswerError {
             Self::ContextOverflow { .. } => "skipped_context_overflow",
         }
     }
+
+    /// For an execution error, the server's name for it (`TypeMismatch`,
+    /// `Location40324`, ...), which tells execution errors apart.
+    pub fn code(&self) -> Option<String> {
+        use mongodb::error::ErrorKind;
+        let Self::Mongo(e) = self else { return None };
+        match &*e.kind {
+            ErrorKind::Command(c) if !c.code_name.is_empty() => Some(c.code_name.clone()),
+            ErrorKind::Command(c) => Some(c.code.to_string()),
+            _ => None,
+        }
+    }
 }
 
 /// Which errors are fed back to the model for another reply (experiment B).
@@ -132,6 +144,8 @@ impl RepairKind {
 pub struct Problem {
     /// `execution`, or a static check's `CheckKind` name.
     pub kind: String,
+    /// An execution error's `AnswerError::code`.
+    pub code: Option<String>,
     pub message: String,
 }
 
@@ -169,6 +183,10 @@ pub struct Answer {
     /// What the static check still finds in the candidate above, which ran
     /// anyway once the static repairs were used up.
     pub check_problems: Vec<Problem>,
+    /// Under the IR arm, what the check could not read in the candidate
+    /// above (`Unsupported`, as in `ir-coverage`): it checked nothing there
+    /// or after it.
+    pub unchecked: Vec<String>,
 }
 
 impl Answer {
@@ -392,6 +410,7 @@ impl<L: LlmClient> Engine<L> {
             rows: Err(AnswerError::ContextOverflow { estimated, window }),
             repairs: Vec::new(),
             check_problems: Vec::new(),
+            unchecked: Vec::new(),
         })
     }
 
@@ -537,6 +556,7 @@ impl<L: LlmClient> Engine<L> {
                 let problem = match &rows {
                     Err(e @ AnswerError::Mongo(_)) if execution_left > 0 => Problem {
                         kind: RepairKind::Execution.name().to_string(),
+                        code: e.code(),
                         message: e.to_string(),
                     },
                     _ => break (query, rows, check_problems),
@@ -575,6 +595,17 @@ impl<L: LlmClient> Engine<L> {
                 latency,
             });
         };
+        let unchecked = match &query {
+            Some(query) if self.repair.checks() => Pipeline::parse(&query.pipeline)
+                .raw_stages()
+                .iter()
+                .flat_map(|r| r.unsupported())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|u| u.to_string())
+                .collect(),
+            _ => Vec::new(),
+        };
         Ok(Answer {
             reply: response.text,
             usage: response.usage,
@@ -583,6 +614,7 @@ impl<L: LlmClient> Engine<L> {
             rows,
             repairs,
             check_problems,
+            unchecked,
         })
     }
 
@@ -619,6 +651,7 @@ impl<L: LlmClient> Engine<L> {
             .into_iter()
             .map(|e| Problem {
                 kind: e.kind.name().to_string(),
+                code: None,
                 message: e.message,
             })
             .collect())

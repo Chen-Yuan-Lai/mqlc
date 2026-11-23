@@ -22,7 +22,7 @@ use mongodb::bson::{Bson, Document};
 
 pub use check::{CheckError, CheckKind, Schema, ValueType};
 pub use coverage::{Coverage, CoverageError, SplitCoverage};
-pub use gold::GoldCheck;
+pub use gold::{DbCount, GoldCheck, GoldError};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum IrError {
