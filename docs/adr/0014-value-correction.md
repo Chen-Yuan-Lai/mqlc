@@ -8,7 +8,7 @@
 
 **只檢查一定要相等的字面值。** 起始 collection 的文件還沒被改形狀之前（`$match`、`$sort`、`$limit`、`$skip`、`$unwind`、`$lookup`）的 `$match` 裡，欄位等於字串、`$eq`、`$in`、`$all`，含 `$and` 與 `$elemMatch` 裡的；`$or`、`$expr`、`$ne`、`$nin` 不檢查，那裡不存在的值可能正是題目要的。`$lookup`（`localField`/`foreignField`）之後，`as` 底下的路徑到 `from` collection 檢查；pipeline 形式的 `$lookup` 與 `includeArrayIndex` 加出的欄位不檢查；遇到其他 stage（含 raw stage）就停。
 
-**候選值由窄到寬撈、Jaro-Winkler 排序，沒有相近的值就不校正。** 依序試三個不分大小寫的 regex，用第一個撈得到值的：含整個字面值、含字面值的每個字詞（順序不拘，所以 `Alice Smith` 撈得到 `Smith, Alice`）、含任一個三字元以上的字詞。每個 regex 依值分組、依值排序後最多讀 1,000 個不同的值：以值而不是文件計數，很多文件共有的值才不會把其他值擠掉；由窄到寬，`county` 這種很多值共有的字詞才不會把 `marin county` 擠出 1,000 個之外；排序讓每次撈到的值相同。取 `strsim` Jaro-Winkler 分數最高的 5 個值，分數取原字串（小寫）與字詞排序後兩者較高者。一個相近的值都沒有時不回饋：多半是題目本來就問資料裡沒有的值，或用錯欄位，候選值幫不上忙，回饋只會讓模型改壞對的答案。每個檢查查詢限時 10 秒。
+**候選值由窄到寬撈、Jaro-Winkler 排序，沒有相近的值就不校正。** 依序試三個不分大小寫的 regex，用第一個撈得到值的：含整個字面值、含字面值的每個字詞（順序不拘，所以 `Alice Smith` 撈得到 `Smith, Alice`）、含任一個兩字元以上的字詞（`6:00 PM` 撈得到 `6PM`）。每個 regex 依值分組、依值排序後最多讀 1,000 個不同的值：以值而不是文件計數，很多文件共有的值才不會把其他值擠掉；由窄到寬，`county` 這種很多值共有的字詞才不會把 `marin county` 擠出 1,000 個之外；排序讓每次撈到的值相同。取 `strsim` Jaro-Winkler 分數最高的 5 個值，分數取原字串（小寫）與字詞排序後兩者較高者。一個相近的值都沒有時不回饋：多半是題目本來就問資料裡沒有的值，或用錯欄位，候選值幫不上忙，回饋只會讓模型改壞對的答案。每個檢查查詢與 pipeline 本身一樣限時 60 秒（限 10 秒時，food_inspection 的大 collection 上有 regex 查詢逾時）。逾時的字面值就略過：一段約 35 個字詞的 violation 說明，「含每個字詞」的 regex 在 52.5 萬份文件上超過 60 秒，所以這種長文字通常不會被校正。
 
 回饋是「Values in the pipeline in your reply do not occur in the database:」，每個值一行（「no animals document has "Alice Smith" in owner.name; the closest values there are "Smith, Alice", ...」），接著「If the question means one of these values, use it and reply with the whole answer again, in the same format. If it means a value that is not in the data, reply with the same answer again.」模型回了同樣的 pipeline 就不再校正，不為同樣的回饋再付一次錢。
 

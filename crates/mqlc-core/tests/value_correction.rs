@@ -206,3 +206,26 @@ async fn a_reply_keeping_the_same_pipeline_ends_the_correction() {
     assert_eq!(answer.repairs.len(), 1);
     assert_eq!(answer.rows.unwrap(), vec![]);
 }
+
+#[tokio::test]
+async fn values_are_found_by_words_of_two_characters() {
+    let docs = vec![
+        doc! { "name": "Tom", "owner": { "name": "6PM" } },
+        doc! { "name": "Rex", "owner": { "name": "7AM" } },
+    ];
+    let (answer, _) = ask_corrected_in(
+        [("animals", docs)],
+        &[
+            reply("animals", &count_owned_by("6:00 PM")),
+            reply("animals", &count_owned_by("6PM")),
+        ],
+    )
+    .await;
+
+    assert_eq!(answer.repairs.len(), 1);
+    let message = &answer.repairs[0].problems[0].message;
+    assert!(
+        message.contains("closest values there are \"6PM\""),
+        "{message}"
+    );
+}

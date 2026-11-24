@@ -14,8 +14,9 @@ use crate::ir::{
 
 /// Distinct values read per pattern, at most.
 const MAX_VALUES: i64 = 1000;
-/// Each query's time limit: a check never holds up a question for long.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Each query's time limit, the pipeline's own: a regex over a large
+/// collection takes more than 10 seconds.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Closest values fed back per missing literal.
 const CLOSEST: usize = 5;
 
@@ -211,8 +212,8 @@ async fn closest_values(
 
 /// Case-insensitive patterns for values like `value`, narrowest first:
 /// containing it, containing each of its words in any order (`Smith, Alice`
-/// for `Alice Smith`), containing any of its words of three or more
-/// characters. Narrower patterns go first so that a word many values share
+/// for `Alice Smith`), containing any of its words of two or more
+/// characters (`6PM` for `6:00 PM`). Narrower patterns go first so that a word many values share
 /// does not fill `MAX_VALUES` with them.
 fn patterns(value: &str) -> Vec<String> {
     let words = words(value);
@@ -227,7 +228,7 @@ fn patterns(value: &str) -> Vec<String> {
     }
     let long: Vec<String> = words
         .iter()
-        .filter(|w| w.chars().count() >= 3)
+        .filter(|w| w.chars().count() >= 2)
         .map(|w| regex::escape(w))
         .collect();
     if long.len() > 1 || (long.len() == 1 && words.len() > 1) {
