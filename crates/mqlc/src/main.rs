@@ -86,6 +86,13 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = RepairArg::Off, global = true)]
     repair: RepairArg,
 
+    /// Once a pipeline runs, check that each string its $match stages
+    /// require a field to equal is in the data; when one is not, feed the
+    /// closest values back for another reply, up to twice. Independent of
+    /// --repair; recorded in the run manifest.
+    #[arg(long, global = true)]
+    value_correction: bool,
+
     /// Sampling temperature, recorded in the run manifest.
     #[arg(long, default_value_t = engine::DEFAULT_TEMPERATURE, global = true)]
     temperature: f32,
@@ -358,7 +365,8 @@ async fn main() -> Result<()> {
                     .with_temperature(cli.temperature)
                     .with_single_message(cli.single_message)
                     .with_thinking_budget(cli.thinking_budget)
-                    .with_repair(repair),
+                    .with_repair(repair)
+                    .with_value_correction(cli.value_correction),
             )
             .await
         }
@@ -378,7 +386,8 @@ async fn main() -> Result<()> {
                     .with_temperature(cli.temperature)
                     .with_single_message(cli.single_message)
                     .with_thinking_budget(cli.thinking_budget)
-                    .with_repair(repair),
+                    .with_repair(repair)
+                    .with_value_correction(cli.value_correction),
             )
             .await
         }

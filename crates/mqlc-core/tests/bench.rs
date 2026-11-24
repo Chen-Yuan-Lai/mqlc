@@ -1153,3 +1153,60 @@ async fn a_batch_answer_is_repaired_synchronously_at_the_full_price() {
     assert!((repaired.repairs[0].cost_usd.unwrap() - per_call).abs() < 1e-12);
     assert!((repaired.cost_usd.unwrap() - 1.5 * per_call).abs() < 1e-12);
 }
+
+#[tokio::test]
+async fn a_value_correction_is_recorded_as_a_round_and_in_the_manifest() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let run_dir = tempfile::tempdir().unwrap();
+    let usage = Usage {
+        input_tokens: 1000,
+        output_tokens: 100,
+        ..Usage::default()
+    };
+    let llm = ScriptedLlm::new([
+        reply(
+            "animals",
+            r#"[{"$match": {"species": "Cat"}}, {"$count": "n"}]"#,
+        ),
+        reply(
+            "animals",
+            r#"[{"$match": {"species": "cat"}}, {"$count": "n"}]"#,
+        ),
+        reply("animals", r#"[{"$count": "n"}]"#),
+    ])
+    .with_model("claude-haiku-4-5")
+    .with_usage(usage);
+    let engine = Engine::new(
+        llm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_value_correction(true);
+    let samples = engine.dataset().samples().to_vec();
+
+    bench::run(
+        &engine,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    // Haiku 4.5: $1/M input, $5/M output.
+    let per_call = 0.001 + 0.0005;
+    let records = records(run_dir.path());
+    let corrected = &records[0];
+    assert_eq!(corrected.row_count, Some(1));
+    assert_eq!(corrected.repairs.len(), 1);
+    assert_eq!(corrected.repairs[0].kind, "value_correction");
+    assert_eq!(corrected.repairs[0].errors[0].kind, "missing_value");
+    assert!((corrected.cost_usd.unwrap() - 2.0 * per_call).abs() < 1e-12);
+    assert!(records[1].repairs.is_empty());
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["config"]["value_correction"], true);
+}

@@ -15,6 +15,7 @@ use crate::ir::{Pipeline, Schema};
 use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Turn, Usage, with_retries};
 use crate::mdl::{MdlError, MdlProject};
 use crate::reply::{ParseError, parse_reply};
+use crate::values;
 
 /// Room for the reply itself; thinking gets its budget on top.
 const MAX_TOKENS: u32 = 4096;
@@ -24,6 +25,8 @@ const WRITE_STAGES: [&str; 2] = ["$out", "$merge"];
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Repairs of each kind a question gets at most (experiment B).
 pub const MAX_REPAIRS: u32 = 2;
+/// Value corrections a question gets at most, on top of its repairs.
+pub const MAX_VALUE_CORRECTIONS: u32 = 2;
 
 /// Failures that leave no model answer to record.
 #[derive(Debug, thiserror::Error)]
@@ -128,6 +131,8 @@ impl Repair {
 pub enum RepairKind {
     StaticCheck,
     Execution,
+    /// A literal no document has (`Engine::with_value_correction`).
+    ValueCorrection,
 }
 
 impl RepairKind {
@@ -135,6 +140,7 @@ impl RepairKind {
         match self {
             Self::StaticCheck => "static_check",
             Self::Execution => "execution",
+            Self::ValueCorrection => "value_correction",
         }
     }
 }
@@ -142,7 +148,7 @@ impl RepairKind {
 /// One error found in a candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
-    /// `execution`, or a static check's `CheckKind` name.
+    /// `execution`, `missing_value`, or a static check's `CheckKind` name.
     pub kind: String,
     /// An execution error's `AnswerError::code`.
     pub code: Option<String>,
@@ -221,6 +227,10 @@ pub struct Settings {
     /// prompt (#19). Absent from manifests written before it existed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_message: bool,
+    /// Whether literals no document has are fed back with the closest values
+    /// (#13). Absent from manifests written before it existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub value_correction: bool,
 }
 
 /// Where the schema knowledge in the prompt comes from (experiment A).
@@ -290,6 +300,7 @@ pub struct Engine<L> {
     single_message: bool,
     thinking_budget: Option<u32>,
     repair: Repair,
+    value_correction: bool,
     /// Rendered MDL per database, loaded once so every prompt of a run
     /// matches the hash in its manifest.
     mdl: Mutex<HashMap<String, String>>,
@@ -308,6 +319,7 @@ impl<L: LlmClient> Engine<L> {
             single_message: false,
             thinking_budget: None,
             repair: Repair::Off,
+            value_correction: false,
             mdl: Mutex::default(),
             schemas: Mutex::default(),
         }
@@ -342,6 +354,16 @@ impl<L: LlmClient> Engine<L> {
         self
     }
 
+    /// Once a candidate runs, checks that each string its `$match` stages
+    /// require a field to equal is in the data; when one is not, but values
+    /// like it are, feeds them back for another reply, up to
+    /// `MAX_VALUE_CORRECTIONS` times. An empty result is never corrected by
+    /// itself.
+    pub fn with_value_correction(mut self, on: bool) -> Self {
+        self.value_correction = on;
+        self
+    }
+
     fn max_tokens(&self) -> u32 {
         MAX_TOKENS + self.thinking_budget.unwrap_or(0)
     }
@@ -368,6 +390,7 @@ impl<L: LlmClient> Engine<L> {
             ir: self.repair.checks(),
             max_repairs: self.repair.max_repairs(),
             single_message: self.single_message,
+            value_correction: self.value_correction,
         }
     }
 
@@ -529,6 +552,13 @@ impl<L: LlmClient> Engine<L> {
     ) -> Result<Answer, AskError> {
         let mut static_left = self.repair.static_repairs();
         let mut execution_left = self.repair.max_repairs();
+        // The last candidate whose values were fed back.
+        let mut corrected: Option<Query> = None;
+        let mut values_left = if self.value_correction {
+            MAX_VALUE_CORRECTIONS
+        } else {
+            0
+        };
         // Built at the first repair: most answers need none.
         let mut request: Option<LlmRequest> = None;
         let mut repairs = Vec::new();
@@ -553,17 +583,33 @@ impl<L: LlmClient> Engine<L> {
                     }
                     Err(e) => (None, Err(e)),
                 };
-                let problem = match &rows {
-                    Err(e @ AnswerError::Mongo(_)) if execution_left > 0 => Problem {
-                        kind: RepairKind::Execution.name().to_string(),
-                        code: e.code(),
-                        message: e.to_string(),
-                    },
+                let repair = match (&query, &rows) {
+                    (_, Err(e @ AnswerError::Mongo(_))) if execution_left > 0 => {
+                        execution_left -= 1;
+                        let problem = Problem {
+                            kind: RepairKind::Execution.name().to_string(),
+                            code: e.code(),
+                            message: e.to_string(),
+                        };
+                        (RepairKind::Execution, vec![problem])
+                    }
+                    // The same pipeline again: the model kept the value, as
+                    // the feedback allows.
+                    (Some(query), Ok(_))
+                        if values_left > 0 && corrected.as_ref() != Some(query) =>
+                    {
+                        let missing = self.missing_values(&sample.db_id, query).await?;
+                        if missing.is_empty() {
+                            break (Some(query.clone()), rows, check_problems);
+                        }
+                        values_left -= 1;
+                        corrected = Some(query.clone());
+                        (RepairKind::ValueCorrection, missing)
+                    }
                     _ => break (query, rows, check_problems),
                 };
-                execution_left -= 1;
                 ran = Some((query, rows, check_problems));
-                (RepairKind::Execution, vec![problem])
+                repair
             };
             if request.is_none() {
                 request = Some(self.request(sample)?);
@@ -579,7 +625,7 @@ impl<L: LlmClient> Engine<L> {
                 match ran {
                     Some(outcome) => break outcome,
                     None => {
-                        (static_left, execution_left) = (0, 0);
+                        (static_left, execution_left, values_left) = (0, 0, 0);
                         continue;
                     }
                 }
@@ -657,6 +703,32 @@ impl<L: LlmClient> Engine<L> {
             .collect())
     }
 
+    /// The literals of `query` that no document has, each with the values
+    /// closest to it.
+    async fn missing_values(&self, db_id: &str, query: &Query) -> Result<Vec<Problem>, AskError> {
+        let literals = values::literals(&query.collection, &Pipeline::parse(&query.pipeline));
+        let missing = values::missing(&self.mongo.database(db_id), literals)
+            .await
+            .map_err(AskError::Database)?;
+        Ok(missing
+            .into_iter()
+            .map(|m| {
+                let quoted: Vec<String> = m.closest.iter().map(|v| quote(v)).collect();
+                Problem {
+                    kind: "missing_value".to_string(),
+                    code: None,
+                    message: format!(
+                        "no {} document has {} in {}; the closest values there are {}",
+                        m.literal.collection,
+                        quote(&m.literal.value),
+                        m.literal.path,
+                        quoted.join(", ")
+                    ),
+                }
+            })
+            .collect())
+    }
+
     /// The outer error is the database failing; the inner one is the query
     /// failing, which is the model's answer being wrong.
     async fn execute(
@@ -695,20 +767,30 @@ impl<L: LlmClient> Engine<L> {
 
 /// The user turn that asks for a repair.
 fn feedback(kind: RepairKind, problems: &[Problem]) -> String {
-    let what = match kind {
-        RepairKind::StaticCheck => {
-            "The pipeline in your reply does not fit the MongoDB schema description"
-        }
-        RepairKind::Execution => "Running the pipeline in your reply failed",
+    let correct = "Correct it and reply with the whole answer again, in the same format.";
+    let (what, ask) = match kind {
+        RepairKind::StaticCheck => (
+            "The pipeline in your reply does not fit the MongoDB schema description",
+            correct,
+        ),
+        RepairKind::Execution => ("Running the pipeline in your reply failed", correct),
+        RepairKind::ValueCorrection => (
+            "Values in the pipeline in your reply do not occur in the database",
+            "If the question means one of these values, use it and reply with the whole answer \
+             again, in the same format. If it means a value that is not in the data, reply with \
+             the same answer again.",
+        ),
     };
     let list: Vec<String> = problems
         .iter()
         .map(|p| format!("- {}", p.message))
         .collect();
-    format!(
-        "{what}:\n{}\n\nCorrect it and reply with the whole answer again, in the same format.",
-        list.join("\n")
-    )
+    format!("{what}:\n{}\n\n{ask}", list.join("\n"))
+}
+
+/// `value` as a JSON string, the way the pipeline writes it.
+fn quote(value: &str) -> String {
+    serde_json::Value::from(value).to_string()
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -724,7 +806,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 
 /// Errors that say nothing about the query: the server is unreachable or
 /// rejects our credentials.
-fn is_unavailable(e: &mongodb::error::Error) -> bool {
+pub(crate) fn is_unavailable(e: &mongodb::error::Error) -> bool {
     use mongodb::error::ErrorKind;
     matches!(
         *e.kind,

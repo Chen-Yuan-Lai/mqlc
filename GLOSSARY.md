@@ -105,5 +105,5 @@ gold pipeline 完全不需要 raw stage 的 sample 比例，以題為單位計�
 _Avoid_：retry（指「修正」時）、self-correction
 
 **Value correction（值校正）**：
-pipeline 中的字面值在資料中不存在時，找出最接近的實際值並請模型重新生成。
+pipeline 中的字面值在資料中不存在時，找出最接近的實際值並請模型重新生成。次數與 repair 分開計算，但和 repair 記在同一個 `repairs` 紀錄裡（kind 為 `value_correction`）。
 _Avoid_：value repair、fuzzy match

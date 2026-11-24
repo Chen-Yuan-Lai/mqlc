@@ -97,7 +97,7 @@ pub struct Record {
 pub struct RecordError {
     /// `truncated`, `parse`, `write_stage` or `execution`; for a static
     /// check, `unknown_collection`, `unknown_field`, `type_mismatch` or
-    /// `unwind_non_array`.
+    /// `unwind_non_array`; for a value correction, `missing_value`.
     pub kind: String,
     /// For `execution`, the server's name for the error (`TypeMismatch`,
     /// ...). Absent from records written before #12.
@@ -110,7 +110,7 @@ pub struct RecordError {
 /// synchronous call, at the full price.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepairRecord {
-    /// `static_check` or `execution`.
+    /// `static_check`, `execution` or `value_correction`.
     pub kind: String,
     pub errors: Vec<RecordError>,
     pub usage: Usage,

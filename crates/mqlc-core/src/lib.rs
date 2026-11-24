@@ -11,6 +11,7 @@ pub mod mdl;
 mod pricing;
 pub mod profile;
 mod reply;
+mod values;
 
 #[cfg(feature = "testing")]
 pub mod testing;
