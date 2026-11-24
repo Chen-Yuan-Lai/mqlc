@@ -99,6 +99,57 @@ regains 4.9 points on formula_1 and loses 4.8 on california_schools, the
 database whose official fields it now matches (83 questions, so 4 of
 them). The train and dev runs of #20 cost USD 10.71.
 
+### Experiment B scores
+
+What the static check adds to repairing ([arms](#experiment-b), ADR 0013),
+on dev with Haiku 4.5 and `--arm official-auto-mdl` (the merge of #20),
+temperature 0, no thinking, batch. Each `--repair` arm is compared with the
+run without repairs (the `off` row, the merge of #20 above) and the IR arm
+with the control arm. Both ran at ecca088-dirty, the code later committed as
+8210699 (their records carry the `unchecked` and `code` fields it added);
+value correction (#13) came later and is off.
+
+| `--repair` | Exec-Rate | Soft-EX | vs off | p | vs execution | p | Strict-EX | Repaired questions | Repair cost (USD, included) | Cost (USD) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| [off](runs/c20-dev-official-auto-mdl/manifest.json) | 98.31 | 50.28 | | | | | 20.51 | | | 1.67 |
+| [execution](runs/expB-dev-execution/manifest.json) | 99.86 | 51.19 | +0.91 | 0.002 | | | 20.65 | 21 | 0.17 | 1.79 |
+| [static-check](runs/expB-dev-static-check/manifest.json) | 99.86 | **51.40** | +1.12 | <0.001 | +0.21 | 0.250 | 20.72 | 44 | 0.22 | 1.87 |
+
+Repairing execution errors gains 0.9 points (15 questions right against 2
+lost, p = 0.002) for 7% more spend: 22 rounds on 21 questions, led by
+`BadValue` and the `$cond` accumulator (`Location40237`, 4 each). The `off`
+run is an earlier build in another batch, so not every flip is the repair's:
+10 of the 15 gains were repaired and neither loss was; the other 7 got the
+same reply scored differently or a different first reply (19 of the
+unrepaired first replies differ). The repair itself is +10, none lost. The static
+check adds 3 questions on top, none lost: no measurable gain (p = 0.250) for
+another 5% of spend. Both arms end with the same two failures (one
+`ConversionFailure`, one unparsable reply).
+
+The check flagged 25 of the 1,423 first pipelines (it read 94.1% of them in
+full; `$regex` with `$options` and `$substr` lead what it cannot read):
+22 for `unknown_field`, 2 for `type_mismatch` and 1 for `unwind_non_array`.
+Every path it flagged that we looked up in the database is absent there, so
+none of the 25 looks like a false positive. What came of them, against the
+control arm, which got the same first replies:
+
+| Outcome | Questions | What the check found |
+|---|--:|---|
+| right only with the check | 3 | a field on the wrong collection (`userDisplayName` on `badges`), a field compared with the string `"$awayGoals"` in `$match`, a field no earlier stage made |
+| right in both | 4 | errors that do not change the rows, such as a last `$sort` on a field projected away |
+| wrong in both | 18 | 10 on thrombosis_prediction, 5 on toxicology, 3 elsewhere |
+
+16 of the 18 pass the check after repairing and still answer wrong. On
+toxicology, 3 read `atoms` after projecting it away and 2 read a field no
+earlier stage made; the repaired pipelines run but return other rows. On
+thrombosis_prediction, 9 look for lab results where they are not
+(`examinations.igg`, `recentLabs.aclIgG`, `kct` at the top level): the
+feedback says the field is missing but not where it is. The tenth compares
+the string field `dna` with a number. The other 2 still fail the check after
+both repairs. On dev, the static check helps only when the first pipeline is
+wrong in a way the schema shows, under 2% of them; changing its feedback
+would be tuned on train (ADR 0006). The two runs cost USD 3.66 (#14).
+
 ## Setup
 
 Requirements: Rust (stable), Docker Engine with the compose plugin, and
