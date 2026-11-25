@@ -15,6 +15,7 @@ use mongodb::bson::Bson;
 
 use super::*;
 use crate::dataset::CollectionFields;
+use crate::mdl::Mdl;
 
 /// A BSON type, as far as the check tells types apart: every number is a
 /// `Number`.
@@ -159,13 +160,7 @@ impl Schema {
                         Some(rest) if prefixed => rest,
                         _ => field.as_str(),
                     };
-                    // Only ever null is what a migration that saw no values
-                    // writes, not a type to check against.
-                    let types = data_type
-                        .split(',')
-                        .map(|w| ValueType::from_official(w.trim()))
-                        .collect::<Option<BTreeSet<_>>>()
-                        .filter(|t| t != &BTreeSet::from([ValueType::Null]));
+                    let types = known_types(data_type.split(','));
                     shape.fields.insert(path.to_string(), types);
                 }
                 shape.fields.entry("_id".to_string()).or_insert(None);
@@ -174,6 +169,36 @@ impl Schema {
             .collect();
         Self { collections }
     }
+
+    /// From a profile's MDL: each model's columns with the types seen. A
+    /// field the profile never saw is reported as missing.
+    pub fn from_mdl(mdl: &Mdl) -> Self {
+        let collections = mdl
+            .models
+            .iter()
+            .map(|model| {
+                let mut shape = Shape::new(format!("collection `{}`", model.name));
+                for column in &model.columns {
+                    let path = column.properties.get("mqlc.path").unwrap_or(&column.name);
+                    let types = known_types(column.r#type.split('|'));
+                    shape.fields.insert(path.clone(), types);
+                }
+                shape.fields.entry("_id".to_string()).or_insert(None);
+                (model.table_reference.table.clone(), shape)
+            })
+            .collect();
+        Self { collections }
+    }
+}
+
+/// The types of a field described with these type names, `None` when one of
+/// them is not a type the check knows. Only ever null is what a migration
+/// (or a profile) that saw no values writes, not a type to check against.
+fn known_types<'a>(words: impl Iterator<Item = &'a str>) -> Types {
+    words
+        .map(|w| ValueType::from_official(w.trim()))
+        .collect::<Option<BTreeSet<_>>>()
+        .filter(|t| t != &BTreeSet::from([ValueType::Null]))
 }
 
 impl Pipeline {

@@ -1,6 +1,6 @@
 //! The single-question API: question → prompt → LLM → pipeline → rows.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -642,14 +642,7 @@ impl<L: LlmClient> Engine<L> {
             });
         };
         let unchecked = match &query {
-            Some(query) if self.repair.checks() => Pipeline::parse(&query.pipeline)
-                .raw_stages()
-                .iter()
-                .flat_map(|r| r.unsupported())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .map(|u| u.to_string())
-                .collect(),
+            Some(query) if self.repair.checks() => Pipeline::parse(&query.pipeline).unchecked(),
             _ => Vec::new(),
         };
         Ok(Answer {

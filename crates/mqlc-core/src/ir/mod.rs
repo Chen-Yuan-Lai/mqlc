@@ -441,6 +441,18 @@ impl Pipeline {
         raw
     }
 
+    /// What the static check cannot read, as the record's `unchecked`:
+    /// every operator of every raw stage, once each, in order.
+    pub fn unchecked(&self) -> Vec<String> {
+        self.raw_stages()
+            .iter()
+            .flat_map(|r| r.unsupported())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect()
+    }
+
     fn collect_raw<'a>(&'a self, raw: &mut Vec<&'a RawStage>) {
         for stage in &self.stages {
             match stage {

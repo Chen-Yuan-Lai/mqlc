@@ -7,7 +7,7 @@ Workspace:
 
 - `mqlc-core`: all logic (dataset access, schema profiler, prompt assembly, LLM backends, reply parsing, execution)
 - `mqlc`: CLI
-- `mqlc-mcp`: MCP server (not implemented yet)
+- `mqlc-mcp`: MCP server (`profile_schema`, `validate_pipeline`)
 
 ## Scores
 
@@ -467,6 +467,33 @@ split uses, so train is fully covered:
 | dev | 1,424 | 1,376 | 96.6% |
 
 The dev gaps are led by `$substr` (16 samples) and `$objectToArray` (14).
+
+## MCP server
+
+`mqlc-mcp` gives an MCP host the profiler and the static check on any MongoDB
+database, not only the benchmark's; the host writes the MQL itself (ADR 0008).
+It takes one connection string and calls no LLM. Register it with Claude Code:
+
+```bash
+cargo build --release -p mqlc-mcp
+claude mcp add mqlc -- "$PWD/target/release/mqlc-mcp" \
+  'mongodb://mqlc:mqlc@localhost:27017/?authSource=admin'
+```
+
+The connection string can come from `MQLC_MONGO_URI` instead
+(`claude mcp add mqlc -e MQLC_MONGO_URI=... -- .../mqlc-mcp`). A read-only
+user is enough.
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `profile_schema` | `database` | the auto MDL as `--arm auto-mdl` puts it in the prompt |
+| `validate_pipeline` | `database`, `collection`, `pipeline` (Extended JSON array) | `errors` (`kind`, `message`) and `unchecked`, as `--repair static-check` finds them |
+
+`validate_pipeline` checks against the database's latest profile, profiling it
+on first use; call `profile_schema` again after the data changes. Profiling
+reads up to 100,000 documents per collection, and the profile shows the most
+common values of each field, so the host sees the data, not only its shape:
+do not point it at fields the host should not read.
 
 ## Tests
 
