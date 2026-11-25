@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use mongodb::bson::Bson;
@@ -53,10 +52,16 @@ pub enum BenchError {
         path: PathBuf,
         source: serde_json::Error,
     },
-    /// The arm's knowledge is missing or broken, found before anything is
-    /// asked; in a replay, also the database being unavailable.
+    /// The arm's knowledge is missing or broken, found before anything is asked.
     #[error(transparent)]
     Knowledge(#[from] AskError),
+    /// A replay stopped: the database is unavailable or the knowledge broken.
+    #[error("cannot replay: {0}")]
+    Replay(AskError),
+    /// A run whose answers were repaired or value-corrected: its records and
+    /// scores are of the last reply, not the first one a replay feeds in.
+    #[error("{path} was answered with repairs or value correction; replay a run without them")]
+    RepairedRun { path: PathBuf },
     #[error("{path} line {line} is not a valid record: {source}")]
     Corrupt {
         path: PathBuf,
@@ -765,13 +770,12 @@ fn open_append(path: &Path) -> std::io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
-/// The LLM of a replay: answers every call with the reply being replayed, so
-/// a repair gets the same reply again, at no cost. Its context window never
-/// overflows.
-#[derive(Default)]
-pub struct ReplayLlm {
-    reply: Mutex<String>,
-}
+/// The LLM of a replay: answers every repair with an empty reply, which
+/// fails to parse and so ends the answer there. The first repair or value
+/// correction is decided before any call, and is all a replay reports. Its
+/// context window is unbounded, so a repair that a backend with a small
+/// window would not send is reported anyway.
+pub struct ReplayLlm;
 
 impl LlmClient for ReplayLlm {
     fn model(&self) -> &str {
@@ -792,7 +796,7 @@ impl LlmClient for ReplayLlm {
 
     async fn complete(&self, _: &LlmRequest) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
-            text: self.reply.lock().unwrap().clone(),
+            text: String::new(),
             usage: Usage::default(),
             truncated: false,
         })
@@ -807,6 +811,12 @@ impl LlmClient for ReplayLlm {
     }
 }
 
+/// What a replay found: one entry per recorded candidate.
+#[derive(Debug)]
+pub struct Replay {
+    pub candidates: Vec<Replayed>,
+}
+
 /// One recorded candidate, replayed.
 #[derive(Debug)]
 pub struct Replayed {
@@ -814,54 +824,122 @@ pub struct Replayed {
     pub db_id: String,
     pub candidate: u32,
     /// The first repair or value correction the engine asks for, if any.
-    pub first_repair: Option<(RepairKind, Vec<Problem>)>,
+    pub first_round: Option<(RepairKind, Vec<Problem>)>,
     /// The candidate's Soft-EX in the run's `scores.jsonl`, if scored.
     pub soft_ex: Option<bool>,
 }
 
+/// One line per candidate that would get feedback, with its score, kind and
+/// first error, then the totals by kind and score.
+impl std::fmt::Display for Replay {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let score = |s: Option<bool>| match s {
+            Some(true) => "right",
+            Some(false) => "wrong",
+            None => "unscored",
+        };
+        let mut totals: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for r in &self.candidates {
+            let Some((kind, problems)) = &r.first_round else {
+                continue;
+            };
+            *totals.entry((kind.name(), score(r.soft_ex))).or_default() += 1;
+            // Execution errors carry the whole server response.
+            let first: String = problems
+                .first()
+                .map_or("", |p| p.message.as_str())
+                .chars()
+                .take(200)
+                .collect();
+            writeln!(
+                f,
+                "{}\t{}\t{}\t{}\t{first}",
+                r.sample_id,
+                r.db_id,
+                score(r.soft_ex),
+                kind.name()
+            )?;
+        }
+        let fed_back: usize = totals.values().sum();
+        writeln!(
+            f,
+            "\n{} candidates replayed, {fed_back} would get feedback",
+            self.candidates.len()
+        )?;
+        for ((kind, score), n) in totals {
+            writeln!(f, "  {kind:<17} {score:<9} {n}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Feeds each recorded reply to `samples` in `run_dir` to `engine`, as if
 /// the LLM had just given it, and reports what the engine's settings would
-/// repair. Candidates that were never sent (context overflow) are left out.
-/// Reads the run directory and writes nothing to it.
+/// feed back first. Candidates that were never sent (context overflow) are
+/// left out. Reads the run directory and writes nothing to it.
 pub async fn replay(
     engine: &Engine<ReplayLlm>,
     run_dir: &Path,
     samples: &[Sample],
-) -> Result<Vec<Replayed>, BenchError> {
+) -> Result<Replay, BenchError> {
+    let manifest_path = run_dir.join(MANIFEST);
+    let manifest: Manifest = fs::read_to_string(&manifest_path)
+        .map_err(|source| BenchError::Io {
+            path: manifest_path.clone(),
+            source,
+        })
+        .and_then(|text| {
+            serde_json::from_str(&text).map_err(|source| BenchError::BadManifest {
+                path: manifest_path.clone(),
+                source,
+            })
+        })?;
     let (records, _) = read_records(&run_dir.join(RESULTS))?;
+    let settings = &manifest.config.settings;
+    if settings.max_repairs > 0
+        || settings.value_correction
+        || records.iter().any(|r| !r.repairs.is_empty())
+    {
+        return Err(BenchError::RepairedRun {
+            path: run_dir.to_path_buf(),
+        });
+    }
     let scores = read_scores(&run_dir.join(SCORES))?;
     let by_id: HashMap<&str, &Sample> = samples.iter().map(|s| (s.sample_id.as_str(), s)).collect();
-    let mut replayed = Vec::new();
+    let mut candidates = Vec::new();
     for record in records {
         let Some(sample) = by_id.get(record.sample_id.as_str()) else {
             continue;
         };
+        // Record error kinds are a stored format (`AnswerError::kind`).
         let kind = record.error.as_ref().map(|e| e.kind.as_str());
         if kind == Some("skipped_context_overflow") {
             continue;
         }
-        *engine.llm().reply.lock().unwrap() = record.reply.clone();
         let response = LlmResponse {
-            text: record.reply.clone(),
+            text: record.reply,
             usage: Usage::default(),
             truncated: kind == Some("truncated"),
         };
-        let answer = engine.answer(sample, response, None).await?;
-        replayed.push(Replayed {
+        let answer = engine
+            .answer(sample, response, None)
+            .await
+            .map_err(BenchError::Replay)?;
+        candidates.push(Replayed {
             soft_ex: scores
                 .get(&(record.sample_id.clone(), record.candidate))
                 .copied(),
             sample_id: record.sample_id,
             db_id: record.db_id,
             candidate: record.candidate,
-            first_repair: answer
+            first_round: answer
                 .repairs
                 .into_iter()
                 .next()
                 .map(|r| (r.kind, r.problems)),
         });
     }
-    Ok(replayed)
+    Ok(Replay { candidates })
 }
 
 /// Soft-EX per (sample, candidate) in `path`, none if it does not exist.

@@ -1,6 +1,6 @@
 # Coding standards
 
-Rules for reviewing a change, each a judgement call that no check can make. Apply every rule to every hunk.
+Rules for reviewing a change, each a judgement call that no check can make.
 
 ## Glossary words keep their meaning
 

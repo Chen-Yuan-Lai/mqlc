@@ -8,7 +8,7 @@ use std::fs;
 use mongodb::bson::doc;
 use mqlc_core::bench::{self, Options, ReplayLlm};
 use mqlc_core::testing::ScriptedLlm;
-use mqlc_core::{Dataset, Engine, RepairKind};
+use mqlc_core::{Dataset, Engine, Repair, RepairKind};
 use support::{dataset_dir, mongo_with, reply};
 
 #[tokio::test]
@@ -58,7 +58,7 @@ async fn a_replay_reports_what_the_new_settings_would_repair_and_how_it_scored()
     fs::write(run_dir.path().join("results.jsonl"), &results).unwrap();
 
     let replaying = Engine::new(
-        ReplayLlm::default(),
+        ReplayLlm,
         mongo.client.clone(),
         Dataset::open(data.path()).unwrap(),
     )
@@ -67,9 +67,13 @@ async fn a_replay_reports_what_the_new_settings_would_repair_and_how_it_scored()
         .await
         .unwrap();
 
-    assert_eq!(replayed.len(), 2);
-    let cat = replayed.iter().find(|r| r.sample_id == "dev_7").unwrap();
-    let (kind, problems) = cat.first_repair.as_ref().unwrap();
+    assert_eq!(replayed.candidates.len(), 2);
+    let cat = replayed
+        .candidates
+        .iter()
+        .find(|r| r.sample_id == "dev_7")
+        .unwrap();
+    let (kind, problems) = cat.first_round.as_ref().unwrap();
     assert_eq!(*kind, RepairKind::ValueCorrection);
     assert_eq!(problems[0].kind, "missing_value");
     assert!(
@@ -78,11 +82,61 @@ async fn a_replay_reports_what_the_new_settings_would_repair_and_how_it_scored()
         problems[0].message
     );
     assert_eq!(cat.soft_ex, Some(false));
-    let dog = replayed.iter().find(|r| r.sample_id == "dev_8").unwrap();
-    assert!(dog.first_repair.is_none());
+    let dog = replayed
+        .candidates
+        .iter()
+        .find(|r| r.sample_id == "dev_8")
+        .unwrap();
+    assert!(dog.first_round.is_none());
     assert_eq!(dog.soft_ex, Some(true));
     assert_eq!(
         fs::read_to_string(run_dir.path().join("results.jsonl")).unwrap(),
         results
+    );
+    let report = replayed.to_string();
+    assert!(
+        report.contains("2 candidates replayed, 1 would get feedback"),
+        "{report}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_that_repaired_its_answers_is_not_replayed() {
+    // Its records and scores are of the last reply, not the first.
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let run_dir = tempfile::tempdir().unwrap();
+    let recorded = Engine::new(
+        ScriptedLlm::new([
+            reply("animals", r#"[{"$cnt": "n"}]"#),
+            reply("animals", r#"[{"$count": "n"}]"#),
+            reply("animals", r#"[{"$count": "n"}]"#),
+        ]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_repair(Repair::Execution);
+    let samples = recorded.dataset().samples().to_vec();
+    bench::run(
+        &recorded,
+        run_dir.path(),
+        &samples,
+        &Options::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    let replaying = Engine::new(
+        ReplayLlm,
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    )
+    .with_value_correction(true);
+    let refused = bench::replay(&replaying, run_dir.path(), &samples).await;
+
+    assert!(
+        matches!(refused, Err(bench::BenchError::RepairedRun { .. })),
+        "{refused:?}"
     );
 }

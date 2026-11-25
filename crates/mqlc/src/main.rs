@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -225,10 +225,8 @@ enum Command {
     },
     /// Feed a run's recorded replies to the engine as --repair,
     /// --value-correction and --arm now set it, and list the candidates it
-    /// would repair, with how they scored (`score.py`). Calls no LLM: a
-    /// repair gets the recorded reply again. Queries MongoDB, so run nothing
-    /// else against it meanwhile (the time limits would fire). Train only:
-    /// tuning on dev would leak (ADR 0006).
+    /// would give feedback to, with how they scored (`score.py`). Calls no LLM.
+    /// Takes runs without repairs, of train only (ADR 0006).
     Replay {
         /// A run directory written by `mqlc bench`; only read.
         run_dir: PathBuf,
@@ -362,12 +360,17 @@ async fn main() -> Result<()> {
             .cloned()
             .collect();
         anyhow::ensure!(!samples.is_empty(), "no train question matches");
-        let engine = Engine::new(bench::ReplayLlm::default(), mongo, dataset)
+        let engine = Engine::new(bench::ReplayLlm, mongo, dataset)
             .with_arm(arm)
             .with_repair(repair)
             .with_value_correction(cli.value_correction);
-        let replayed = bench::replay(&engine, run_dir, &samples).await?;
-        print!("{}", replay_report(&replayed));
+        let replay = bench::replay(&engine, run_dir, &samples).await?;
+        anyhow::ensure!(
+            !replay.candidates.is_empty(),
+            "no train candidate in {}: replay takes train runs only",
+            run_dir.display()
+        );
+        print!("{replay}");
         return Ok(());
     }
     if let Some(budget) = cli.thinking_budget {
@@ -558,46 +561,6 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// One line per replayed candidate the engine would repair, then the totals.
-fn replay_report(replayed: &[bench::Replayed]) -> String {
-    let score = |s: Option<bool>| match s {
-        Some(true) => "right",
-        Some(false) => "wrong",
-        None => "unscored",
-    };
-    let mut out = String::new();
-    let mut kinds: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-    for r in replayed {
-        let Some((kind, problems)) = &r.first_repair else {
-            continue;
-        };
-        *kinds.entry((kind.name(), score(r.soft_ex))).or_default() += 1;
-        // Execution errors carry the whole server response.
-        let first: String = problems
-            .first()
-            .map_or("", |p| p.message.as_str())
-            .chars()
-            .take(200)
-            .collect();
-        out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{first}\n",
-            r.sample_id,
-            r.db_id,
-            score(r.soft_ex),
-            kind.name()
-        ));
-    }
-    let repaired: usize = kinds.values().sum();
-    out.push_str(&format!(
-        "\n{} candidates replayed, {repaired} would be repaired\n",
-        replayed.len()
-    ));
-    for ((kind, score), n) in kinds {
-        out.push_str(&format!("  {kind:<17} {score:<9} {n}\n"));
-    }
-    out
 }
 
 fn pretty(pipeline: &[Document]) -> String {
