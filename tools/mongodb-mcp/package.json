@@ -1,0 +1,8 @@
+{
+  "name": "mqlc-mongodb-mcp",
+  "private": true,
+  "description": "The official MongoDB MCP server at the version experiment E runs (ADR 0015).",
+  "dependencies": {
+    "mongodb-mcp-server": "3.4.0"
+  }
+}

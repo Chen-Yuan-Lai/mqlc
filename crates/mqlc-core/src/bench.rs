@@ -104,6 +104,9 @@ pub struct Record {
     /// that the static check could not read, so did not check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unchecked: Vec<String>,
+    /// Under the claude-code backend, the host's calls per tool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_calls: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,6 +174,39 @@ pub struct Options {
     /// Batch mode: how often to check a pending batch until it ends. `None`
     /// returns after one check, with the batch in `Summary::pending_batch`.
     pub batch_poll: Option<Duration>,
+    /// The draw `samples` came from, recorded in the manifest.
+    pub draw: Option<Draw>,
+}
+
+/// Questions drawn at random from those a run selects (experiment E): the
+/// same seed draws the same questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Draw {
+    pub size: usize,
+    pub seed: u64,
+}
+
+impl Draw {
+    /// `size` of `samples`, in the order drawn: a Fisher-Yates shuffle on
+    /// SplitMix64, written out so that a seed draws the same questions
+    /// whatever crate versions are in the lock file.
+    pub fn apply(self, mut samples: Vec<Sample>) -> Vec<Sample> {
+        let mut state = self.seed;
+        let mut next = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let n = self.size.min(samples.len());
+        for i in 0..n {
+            let j = i + (next() % (samples.len() - i) as u64) as usize;
+            samples.swap(i, j);
+        }
+        samples.truncate(n);
+        samples
+    }
 }
 
 /// What `run` reports as it goes.
@@ -206,6 +242,9 @@ pub struct RunConfig {
     /// started before #10, which a rerun fills in.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub knowledge: BTreeMap<String, String>,
+    /// The draw the run's questions came from, if any (`Options::draw`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw: Option<Draw>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +311,7 @@ pub async fn run<L: LlmClient>(
             settings: engine.settings(),
             prompt_hash: engine.dataset().prompt().hash().to_string(),
             knowledge: engine.knowledge_hashes(samples.iter().map(|s| s.db_id.as_str()))?,
+            draw: options.draw,
         },
         Invocation {
             started_at: now(),
@@ -500,7 +540,9 @@ impl<F: FnMut(Progress)> Recorder<F> {
             .collect();
         // Nothing used costs nothing, priced model or not (a prompt that
         // was never sent).
-        let first_cost = if answer.usage == Usage::default() {
+        let first_cost = if let Some(host) = &answer.host {
+            Some(host.cost_usd)
+        } else if answer.usage == Usage::default() {
             Some(0.0)
         } else {
             pricing::cost_usd(&self.model, &answer.usage, batch)
@@ -533,6 +575,7 @@ impl<F: FnMut(Progress)> Recorder<F> {
             cost_usd,
             check_errors: problems(&answer.check_problems),
             unchecked: answer.unchecked,
+            tool_calls: answer.host.map(|h| h.tool_calls).unwrap_or_default(),
             reply: answer.reply,
             repairs,
         };
@@ -799,6 +842,7 @@ impl LlmClient for ReplayLlm {
             text: String::new(),
             usage: Usage::default(),
             truncated: false,
+            host: None,
         })
     }
 
@@ -920,6 +964,7 @@ pub async fn replay(
             text: record.reply,
             usage: Usage::default(),
             truncated: kind == Some("truncated"),
+            host: None,
         };
         let answer = engine
             .answer(sample, response, None)

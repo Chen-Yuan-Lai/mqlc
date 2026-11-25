@@ -149,6 +149,7 @@ impl ScriptedLlm {
             text,
             usage: self.usage,
             truncated,
+            host: None,
         })
     }
 }

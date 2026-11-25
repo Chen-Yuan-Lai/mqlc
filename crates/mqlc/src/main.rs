@@ -8,8 +8,8 @@ use mqlc_core::engine;
 use mqlc_core::mongodb::bson::{Bson, Document};
 use mqlc_core::profile::{self, ProfileOptions};
 use mqlc_core::{
-    AnswerError, AnthropicClient, Arm, Dataset, Engine, LlmClient, OpenAiClient, Repair, Sample,
-    bench, ir,
+    AnswerError, AnthropicClient, Arm, ClaudeCodeClient, Dataset, Engine, LlmClient, McpServers,
+    McpTools, OpenAiClient, Repair, Sample, bench, ir,
 };
 
 #[derive(Parser)]
@@ -33,13 +33,15 @@ struct Cli {
     )]
     mongo_uri: String,
 
-    /// Model id; defaults to claude-haiku-4-5 on the anthropic backend and
-    /// is required with any other.
+    /// Model id; defaults to claude-haiku-4-5 on the anthropic and
+    /// claude-code backends and is required with openai.
     #[arg(long, env = "MQLC_MODEL", global = true)]
     model: Option<String>,
 
     /// `openai` is any OpenAI-compatible endpoint (Ollama, vLLM,
-    /// OpenRouter); it reads an optional OPENAI_API_KEY.
+    /// OpenRouter); it reads an optional OPENAI_API_KEY. `claude-code` runs
+    /// `claude -p` with MCP tools for each question (experiment E, an
+    /// `mcp-*` arm): it uses Claude Code's login, not ANTHROPIC_API_KEY.
     #[arg(
         long,
         env = "MQLC_BACKEND",
@@ -63,6 +65,23 @@ struct Cli {
     /// OLLAMA_CONTEXT_LENGTH without saying so.
     #[arg(long, env = "MQLC_CONTEXT_WINDOW", global = true)]
     context_window: Option<u32>,
+
+    /// The Claude Code executable of the `claude-code` backend.
+    #[arg(long, default_value = "claude", global = true)]
+    claude: PathBuf,
+
+    /// Entry point of the pinned official MongoDB MCP server
+    /// (`scripts/install-mcp.sh` installs it).
+    #[arg(
+        long,
+        default_value = "tools/mongodb-mcp/node_modules/mongodb-mcp-server/dist/esm/index.js",
+        global = true
+    )]
+    official_mcp: PathBuf,
+
+    /// The `mqlc-mcp` binary (`cargo build --release -p mqlc-mcp`).
+    #[arg(long, default_value = "target/release/mqlc-mcp", global = true)]
+    mqlc_mcp: PathBuf,
 
     /// Knowledge in the prompt. Experiment A: the official schema
     /// description, the auto MDL that `mqlc profile` wrote to --mdl-dir in
@@ -135,6 +154,8 @@ enum ArmArg {
     OfficialEvidence,
     HumanMdl,
     OfficialHumanMdl,
+    McpOfficial,
+    McpOfficialMqlc,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -148,6 +169,7 @@ enum RepairArg {
 enum BackendArg {
     Anthropic,
     Openai,
+    ClaudeCode,
 }
 
 #[derive(Subcommand)]
@@ -178,6 +200,15 @@ enum Command {
         /// Only the first N questions of the split (in dataset order).
         #[arg(long)]
         limit: Option<usize>,
+
+        /// Only N questions drawn at random (with --seed) from those --split
+        /// and --db select, before --limit. Recorded in the run manifest.
+        #[arg(long, value_name = "N")]
+        draw: Option<usize>,
+
+        /// Seed of --draw; the same seed draws the same questions.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
 
         /// `batch` submits every unanswered question as one Message Batch at
         /// half price and waits for it; interrupt at any time and rerun to
@@ -242,6 +273,10 @@ enum ModeArg {
     Sync,
     Batch,
 }
+
+/// The model of the anthropic and claude-code backends unless --model says
+/// otherwise.
+const DEFAULT_MODEL: &str = "claude-haiku-4-5";
 
 /// How often a pending batch is checked.
 const BATCH_POLL: Duration = Duration::from_secs(60);
@@ -345,6 +380,8 @@ async fn main() -> Result<()> {
         ArmArg::OfficialHumanMdl => Arm::OfficialHumanMdl {
             dir: cli.human_mdl_dir.clone(),
         },
+        ArmArg::McpOfficial => Arm::Mcp(McpTools::Official),
+        ArmArg::McpOfficialMqlc => Arm::Mcp(McpTools::OfficialMqlc),
     };
     let repair = match cli.repair {
         RepairArg::Off => Repair::Off,
@@ -387,10 +424,58 @@ async fn main() -> Result<()> {
             "--thinking-budget needs --temperature 1 (the API requires it with thinking)"
         );
     }
+    let mcp_tools = match arm {
+        Arm::Mcp(tools) => Some(tools),
+        _ => None,
+    };
+    anyhow::ensure!(
+        mcp_tools.is_some() == (cli.backend == BackendArg::ClaudeCode),
+        "the mcp-* arms go with --backend claude-code, and it takes only them"
+    );
+    if cli.backend == BackendArg::ClaudeCode {
+        // Claude Code sets these itself (ADR 0015).
+        anyhow::ensure!(
+            repair == Repair::Off && !cli.value_correction,
+            "--backend claude-code answers in one session: no --repair or --value-correction"
+        );
+        anyhow::ensure!(
+            cli.thinking_budget.is_none()
+                && cli.temperature == engine::DEFAULT_TEMPERATURE
+                && !cli.single_message,
+            "--backend claude-code takes no --temperature, --thinking-budget or --single-message"
+        );
+        if let Command::Bench { mode, .. } = &cli.command {
+            anyhow::ensure!(
+                *mode == ModeArg::Sync,
+                "--backend claude-code has no batch mode"
+            );
+        }
+    }
     match cli.backend {
+        BackendArg::ClaudeCode => {
+            let tools = mcp_tools.expect("checked above");
+            anyhow::ensure!(
+                cli.official_mcp.exists(),
+                "{} not found: run scripts/install-mcp.sh",
+                cli.official_mcp.display()
+            );
+            anyhow::ensure!(
+                tools == McpTools::Official || cli.mqlc_mcp.exists(),
+                "{} not found: run cargo build --release -p mqlc-mcp",
+                cli.mqlc_mcp.display()
+            );
+            let servers = McpServers {
+                mongo_uri: cli.mongo_uri.clone(),
+                official: std::path::absolute(&cli.official_mcp)?,
+                mqlc_mcp: std::path::absolute(&cli.mqlc_mcp)?,
+            };
+            let model = cli.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+            let llm = ClaudeCodeClient::new(cli.claude, model, tools, &servers);
+            run(cli.command, Engine::new(llm, mongo, dataset).with_arm(arm)).await
+        }
         BackendArg::Anthropic => {
             let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
-            let model = cli.model.unwrap_or_else(|| "claude-haiku-4-5".to_string());
+            let model = cli.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
             let llm = AnthropicClient::new(key, model);
             run(
                 cli.command,
@@ -493,6 +578,8 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
             split,
             db,
             limit,
+            draw,
+            seed,
             mode,
             spend_limit,
         } => {
@@ -501,9 +588,13 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 .iter()
                 .filter(|s| split.includes(&s.split))
                 .filter(|s| db.as_ref().is_none_or(|db| &s.db_id == db))
-                .take(limit.unwrap_or(usize::MAX))
                 .cloned()
                 .collect();
+            let draw = draw.map(|size| bench::Draw { size, seed });
+            if let Some(draw) = draw {
+                samples = draw.apply(samples);
+            }
+            samples.truncate(limit.unwrap_or(usize::MAX));
             // Questions on the same database share a cached prompt prefix.
             samples.sort_by(|a, b| a.db_id.cmp(&b.db_id));
 
@@ -514,6 +605,7 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 },
                 spend_limit_usd: Some(spend_limit),
                 batch_poll: Some(BATCH_POLL),
+                draw,
             };
 
             let total = samples.len();

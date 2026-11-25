@@ -1,5 +1,6 @@
 //! LLM backends behind one trait.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -59,6 +60,19 @@ pub struct LlmResponse {
     pub usage: Usage,
     /// The reply stopped at `max_tokens`.
     pub truncated: bool,
+    /// Set when the model answered as a host using tools (experiment E).
+    pub host: Option<HostRun>,
+}
+
+/// What a host such as Claude Code did on its way to the reply.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HostRun {
+    /// Calls per tool, by the name the host gave it (`mcp__mongodb__find`).
+    pub tool_calls: BTreeMap<String, u32>,
+    /// The host's own estimate of what every call cost, at list prices.
+    pub cost_usd: f64,
+    /// The host stopped at this many agent turns without a final reply.
+    pub out_of_turns: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -183,6 +197,7 @@ impl From<MessagesResponse> for LlmResponse {
             text: m.content.into_iter().map(|b| b.text).collect(),
             usage: m.usage,
             truncated: m.stop_reason.as_deref() == Some("max_tokens"),
+            host: None,
         }
     }
 }
@@ -480,6 +495,7 @@ impl LlmClient for OpenAiClient {
                 ..Usage::default()
             },
             truncated: choice.finish_reason.as_deref() == Some("length"),
+            host: None,
         })
     }
 

@@ -196,3 +196,28 @@ def test_a_run_without_repairs_reports_none(tmp_path, data_dir, mongo_uri):
     assert repairs["execution_codes"] == {}
     # No manifest saying the check was on: nothing to say about it.
     assert summary["static_check"] is None
+    assert summary["tool_calls"] is None
+
+
+def test_reports_the_tool_calls_of_a_claude_code_run(tmp_path, data_dir, mongo_uri):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "manifest.json").write_text(json.dumps({"config": {"backend": "claude-code"}}))
+    names = [{"$match": {"species": "cat"}}, {"$project": {"_id": 0, "name": 1}}]
+    records = [
+        record("dev_2", names) | {"tool_calls": {"mcp__mongodb__find": 2,
+                                                 "mcp__mqlc__validate_pipeline": 1}},
+        record("dev_3", names) | {"tool_calls": {"mcp__mongodb__find": 3}},
+        # No tool called: Claude Code answered from the prompt alone.
+        record("dev_4", None, {"kind": "parse", "message": "no pipeline"}),
+    ]
+    (run / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+
+    tools = score.score_run(run, data_dir, mongo_uri)["tool_calls"]
+
+    assert tools["samples"] == 3
+    assert tools["total"] == 6
+    assert tools["per_sample"] == pytest.approx(2.0)
+    assert tools["samples_without"] == 1
+    assert tools["by_tool"] == {"mcp__mongodb__find": 5, "mcp__mqlc__validate_pipeline": 1}
+    assert tools["samples_using"] == {"mcp__mongodb__find": 2, "mcp__mqlc__validate_pipeline": 1}

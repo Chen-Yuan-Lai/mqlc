@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::dataset::{Dataset, DatasetError, Sample, sha256};
 use crate::ir::{Pipeline, Schema};
-use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse, Turn, Usage, with_retries};
+use crate::llm::{
+    HostRun, LlmClient, LlmError, LlmRequest, LlmResponse, Turn, Usage, with_retries,
+};
 use crate::mdl::{MdlError, MdlProject};
 use crate::reply::{ParseError, parse_reply};
 use crate::values;
@@ -55,6 +57,9 @@ pub enum AskError {
 pub enum AnswerError {
     #[error("reply was cut off at max_tokens ({0})")]
     Truncated(u32),
+    /// The host used up its agent turns and never replied (experiment E).
+    #[error("the host stopped at its limit of {0} turns without a reply")]
+    HostOutOfTurns(u32),
     #[error("cannot parse LLM reply: {0}")]
     Parse(#[from] ParseError),
     #[error("refusing to run a pipeline with a {0} stage: mqlc is read-only")]
@@ -73,6 +78,7 @@ impl AnswerError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Truncated(_) => "truncated",
+            Self::HostOutOfTurns(_) => "max_turns",
             Self::Parse(_) => "parse",
             Self::WriteStage(_) => "write_stage",
             Self::Mongo(_) => "execution",
@@ -193,6 +199,8 @@ pub struct Answer {
     /// above (`Unsupported`, as in `ir-coverage`): it checked nothing there
     /// or after it.
     pub unchecked: Vec<String>,
+    /// What the host did, when the model answered as one (experiment E).
+    pub host: Option<HostRun>,
 }
 
 impl Answer {
@@ -233,6 +241,25 @@ pub struct Settings {
     pub value_correction: bool,
 }
 
+/// The MCP servers a host gets (the arms of experiment E).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTools {
+    /// The official MongoDB MCP server, read-only.
+    Official,
+    /// The official server and `mqlc-mcp`.
+    OfficialMqlc,
+}
+
+impl McpTools {
+    /// The arm's name in records and manifests.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Official => "mcp-official",
+            Self::OfficialMqlc => "mcp-official-mqlc",
+        }
+    }
+}
+
 /// Where the schema knowledge in the prompt comes from (experiment A).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arm {
@@ -262,6 +289,9 @@ pub enum Arm {
     /// the paper's "external knowledge": the upper bound of experiment A. A
     /// sample without evidence gets the official prompt unchanged.
     OfficialEvidence,
+    /// No schema knowledge in the prompt: a host looks the database up with
+    /// these MCP tools (experiment E, ADR 0015).
+    Mcp(McpTools),
 }
 
 impl Arm {
@@ -287,6 +317,7 @@ impl Arm {
             Self::HumanMdl { .. } => "human-mdl",
             Self::OfficialHumanMdl { .. } => "official-human-mdl",
             Self::OfficialEvidence => "official-evidence",
+            Self::Mcp(tools) => tools.name(),
         }
     }
 }
@@ -434,6 +465,7 @@ impl<L: LlmClient> Engine<L> {
             repairs: Vec::new(),
             check_problems: Vec::new(),
             unchecked: Vec::new(),
+            host: None,
         })
     }
 
@@ -479,6 +511,10 @@ impl<L: LlmClient> Engine<L> {
             | Arm::OfficialAutoMdl { .. }
             | Arm::HumanMdl { .. }
             | Arm::OfficialHumanMdl { .. } => self.mdl(db_id)?,
+            Arm::Mcp(_) => format!(
+                "The MongoDB Schema Description is not given: look up the collections and \
+                 fields of the database `{db_id}` with your tools."
+            ),
         })
     }
 
@@ -522,7 +558,10 @@ impl<L: LlmClient> Engine<L> {
             }
             _ => None,
         };
-        let (system, context) = if self.single_message {
+        let (system, context) = if let Arm::Mcp(_) = self.arm {
+            // No schema block: the note in its place says where to look.
+            (prompt.system.clone(), schema)
+        } else if self.single_message {
             (
                 String::new(),
                 format!("{}\n\n{}", prompt.system, prompt.schema_block(&schema)),
@@ -564,8 +603,12 @@ impl<L: LlmClient> Engine<L> {
         let mut repairs = Vec::new();
         let mut text = response.text.clone();
         let mut truncated = response.truncated;
+        let mut out_of_turns = response.host.as_ref().and_then(|h| h.out_of_turns);
         let (query, rows, check_problems) = loop {
-            let candidate = self.parse(&text, truncated);
+            let candidate = match out_of_turns.take() {
+                Some(turns) => Err(AnswerError::HostOutOfTurns(turns)),
+                None => self.parse(&text, truncated),
+            };
             let check_problems = match &candidate {
                 Ok(query) if self.repair.checks() => self.check(sample, query)?,
                 _ => Vec::new(),
@@ -654,6 +697,7 @@ impl<L: LlmClient> Engine<L> {
             repairs,
             check_problems,
             unchecked,
+            host: response.host,
         })
     }
 

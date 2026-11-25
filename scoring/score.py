@@ -13,8 +13,8 @@ right nor wrong: they are left out of all three shares and counted apart.
 
 Writes `scores.jsonl` (one line per record) and `summary.json` (overall, by
 split and by database, plus what the run cost, its errors by kind, what was
-repaired and how much of each pipeline the static check could read) into the
-run directory, and prints the summary. `compare.py` compares two scored runs
+repaired, how much of each pipeline the static check could read and, for a
+Claude Code run, the tools it called) into the run directory, and prints the summary. `compare.py` compares two scored runs
 question by question.
 
     uv run --project scoring scoring/score.py runs/<name>
@@ -175,6 +175,31 @@ def check_report(run_dir: Path, records: list[dict]) -> dict | None:
     }
 
 
+def tool_report(run_dir: Path, records: list[dict]) -> dict | None:
+    """For a run answered by Claude Code (experiment E): how many tools it
+    called per sample, and how often each tool was called and by how many
+    samples. Skipped records called nothing and are left out."""
+    manifest = run_dir / "manifest.json"
+    if (not manifest.exists()
+            or json.loads(manifest.read_text())["config"].get("backend") != "claude-code"):
+        return None
+    asked = [r for r in records if (r.get("error") or {}).get("kind") != SKIPPED]
+    by_tool, using = defaultdict(int), defaultdict(int)
+    for r in asked:
+        for tool, n in r.get("tool_calls", {}).items():
+            by_tool[tool] += n
+            using[tool] += 1
+    total = sum(by_tool.values())
+    return {
+        "samples": len(asked),
+        "total": total,
+        "per_sample": total / len(asked) if asked else None,
+        "samples_without": sum(1 for r in asked if not r.get("tool_calls")),
+        "by_tool": dict(sorted(by_tool.items())),
+        "samples_using": dict(sorted(using.items())),
+    }
+
+
 def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
     ev = load_eval_script(data_dir)
     samples = {s["sample_id"]: s
@@ -196,6 +221,7 @@ def score_run(run_dir: Path, data_dir: Path, mongo_uri: str) -> dict:
         "errors": error_counts(records),
         "repairs": repair_report(records, scores),
         "static_check": check_report(run_dir, records),
+        "tool_calls": tool_report(run_dir, records),
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
@@ -217,6 +243,12 @@ def main() -> None:
         print(f"{db:<26}{s['samples']:>5}{s[SKIPPED]:>9}{s['exec_rate']:>10.2f}%"
               f"{s['soft_ex']:>8.2f}%{s['strict_ex']:>10.2f}%")
     print(f"cost ${summary['cost_usd']:.4f}")
+    if summary["tool_calls"]:
+        t = summary["tool_calls"]
+        print(f"tool calls: {t['total']} ({t['per_sample']:.2f} per sample, "
+              f"{t['samples_without']} samples called none)")
+        for tool, n in t["by_tool"].items():
+            print(f"  {tool:<40}{n:>6} calls{t['samples_using'][tool]:>6} samples")
     if summary["static_check"]:
         c = summary["static_check"]
         top = ", ".join(f"{k} {n}" for k, n in list(c["unchecked"].items())[:8])

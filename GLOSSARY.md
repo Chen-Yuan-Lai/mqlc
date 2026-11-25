@@ -51,6 +51,13 @@ _Avoid_：executable rate、valid rate
 **Leakage（洩漏）**：
 任何依 dev split 內容做的調整：prompt 迭代、人工 MDL、IR 範圍。dev 只用來報分數。
 
+**Host（宿主）**：
+自己透過 MCP 工具查資料庫、寫出 pipeline 的 LLM agent，例如 Claude Code；實驗 E 的受測對象。
+_Avoid_：client、agent（單獨使用時）
+
+**Tool call（工具呼叫）**：
+host 在回答一個 sample 的過程中呼叫一次 MCP 工具。以 Claude Code 給的名稱記錄（`mcp__mongodb__find`）。
+
 ## 知識
 
 **Knowledge（知識）**：

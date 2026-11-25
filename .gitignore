@@ -19,3 +19,4 @@
 __pycache__/
 .env
 /mdl/auto/
+/tools/mongodb-mcp/node_modules/

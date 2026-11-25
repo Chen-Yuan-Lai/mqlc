@@ -449,6 +449,38 @@ train gold pipelines' operators only (ADR 0003): in earlier train runs,
 93.7% (official) and 94.8% (`official-auto-mdl`) of the model's pipelines
 needed no raw stage, the rest mostly for `$regex` with `$options`.
 
+### Experiment E
+
+Experiment E compares the MCP tools a host gets (ADR 0015): Claude Code
+answers each question through `claude -p`, with no schema in the prompt, and
+looks the database up itself:
+
+| `--arm` | MCP servers |
+|---|---|
+| `mcp-official` | the official MongoDB MCP server (`mongodb-mcp-server` 3.4.0, `--readOnly`; it can run queries) |
+| `mcp-official-mqlc` | the official server and `mqlc-mcp` |
+
+```bash
+scripts/install-mcp.sh                  # the pinned official server, into tools/mongodb-mcp
+cargo build --release -p mqlc-mcp
+cargo run -p mqlc -- --backend claude-code --arm mcp-official \
+  bench --split dev --draw 300 --seed 16 --out runs/expE-dev-mcp-official
+```
+
+`--draw 300 --seed 16` draws the same 300 dev questions for both arms; the
+manifest records the draw (`config.draw`), and a rerun with another one is
+refused.
+`claude` runs with Claude Code's own login (`ANTHROPIC_API_KEY` is removed
+from its environment), none of your settings, plugins,
+hooks or CLAUDE.md, no built-in tools and only the arm's MCP servers, at
+most 30 turns per question. Its final reply is parsed, run and scored like
+any other. Each record adds the host's calls per tool (`tool_calls`), and
+its `cost_usd` is what Claude Code reports (list prices; a subscription is
+not billed it, but it shows the usage). `score.py` adds a `tool_calls`
+section to `summary.json`. A server that does not connect, an error from
+Claude Code or its API, or a question still running after 15 minutes stops
+the run unrecorded; running out of turns is recorded as wrong (`max_turns`).
+
 ### IR coverage
 
 ```bash

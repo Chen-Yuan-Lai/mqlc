@@ -1210,3 +1210,47 @@ async fn a_value_correction_is_recorded_as_a_round_and_in_the_manifest() {
             .unwrap();
     assert_eq!(manifest["config"]["value_correction"], true);
 }
+
+#[tokio::test]
+async fn a_drawn_run_records_its_draw_and_refuses_to_resume_with_another() {
+    let data = dataset_dir();
+    let mongo = mongo_with(vec![doc! { "name": "Tom", "species": "cat" }]).await;
+    let run_dir = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        ScriptedLlm::new([reply("animals", r#"[{"$count": "n"}]"#)]),
+        mongo.client.clone(),
+        Dataset::open(data.path()).unwrap(),
+    );
+    let draw = bench::Draw { size: 1, seed: 16 };
+    let samples = draw.apply(engine.dataset().samples().to_vec());
+    let options = Options {
+        draw: Some(draw),
+        ..Options::default()
+    };
+
+    let summary = bench::run(&engine, run_dir.path(), &samples, &options, |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(summary.completed, 1);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["config"]["draw"],
+        serde_json::json!({"size": 1, "seed": 16})
+    );
+
+    // Another seed draws other questions: mixing them in one run is refused.
+    let reseeded = Options {
+        draw: Some(bench::Draw { size: 1, seed: 17 }),
+        ..Options::default()
+    };
+    let err = bench::run(&engine, run_dir.path(), &samples, &reseeded, |_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, bench::BenchError::ConfigMismatch { .. }),
+        "{err}"
+    );
+}
