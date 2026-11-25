@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -223,6 +223,20 @@ enum Command {
         #[arg(long)]
         db: Option<String>,
     },
+    /// Feed a run's recorded replies to the engine as --repair,
+    /// --value-correction and --arm now set it, and list the candidates it
+    /// would repair, with how they scored (`score.py`). Calls no LLM: a
+    /// repair gets the recorded reply again. Queries MongoDB, so run nothing
+    /// else against it meanwhile (the time limits would fire). Train only:
+    /// tuning on dev would leak (ADR 0006).
+    Replay {
+        /// A run directory written by `mqlc bench`; only read.
+        run_dir: PathBuf,
+
+        /// Only questions on this train database, e.g. restaurant.
+        #[arg(long)]
+        db: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -339,6 +353,23 @@ async fn main() -> Result<()> {
         RepairArg::Execution => Repair::Execution,
         RepairArg::StaticCheck => Repair::StaticCheck,
     };
+    if let Command::Replay { run_dir, db } = &cli.command {
+        let samples: Vec<Sample> = dataset
+            .samples()
+            .iter()
+            .filter(|s| s.split == "train")
+            .filter(|s| db.as_ref().is_none_or(|db| &s.db_id == db))
+            .cloned()
+            .collect();
+        anyhow::ensure!(!samples.is_empty(), "no train question matches");
+        let engine = Engine::new(bench::ReplayLlm::default(), mongo, dataset)
+            .with_arm(arm)
+            .with_repair(repair)
+            .with_value_correction(cli.value_correction);
+        let replayed = bench::replay(&engine, run_dir, &samples).await?;
+        print!("{}", replay_report(&replayed));
+        return Ok(());
+    }
     if let Some(budget) = cli.thinking_budget {
         anyhow::ensure!(
             budget >= 1024,
@@ -519,11 +550,54 @@ async fn run<L: LlmClient>(command: Command, engine: Engine<L>) -> Result<()> {
                 std::process::exit(2);
             }
         }
-        Command::IrCoverage | Command::StaticCheck { .. } | Command::Profile { .. } => {
+        Command::IrCoverage
+        | Command::StaticCheck { .. }
+        | Command::Profile { .. }
+        | Command::Replay { .. } => {
             unreachable!("handled before choosing a backend")
         }
     }
     Ok(())
+}
+
+/// One line per replayed candidate the engine would repair, then the totals.
+fn replay_report(replayed: &[bench::Replayed]) -> String {
+    let score = |s: Option<bool>| match s {
+        Some(true) => "right",
+        Some(false) => "wrong",
+        None => "unscored",
+    };
+    let mut out = String::new();
+    let mut kinds: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for r in replayed {
+        let Some((kind, problems)) = &r.first_repair else {
+            continue;
+        };
+        *kinds.entry((kind.name(), score(r.soft_ex))).or_default() += 1;
+        // Execution errors carry the whole server response.
+        let first: String = problems
+            .first()
+            .map_or("", |p| p.message.as_str())
+            .chars()
+            .take(200)
+            .collect();
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{first}\n",
+            r.sample_id,
+            r.db_id,
+            score(r.soft_ex),
+            kind.name()
+        ));
+    }
+    let repaired: usize = kinds.values().sum();
+    out.push_str(&format!(
+        "\n{} candidates replayed, {repaired} would be repaired\n",
+        replayed.len()
+    ));
+    for ((kind, score), n) in kinds {
+        out.push_str(&format!("  {kind:<17} {score:<9} {n}\n"));
+    }
+    out
 }
 
 fn pretty(pipeline: &[Document]) -> String {

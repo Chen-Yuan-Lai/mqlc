@@ -1,22 +1,29 @@
 //! `mqlc bench`: answer a set of samples and append one record per answer
 //! to `results.jsonl` in a run directory, either one call at a time or
-//! through the asynchronous batch API.
+//! through the asynchronous batch API. [`replay`] feeds a finished run's
+//! replies to an engine with other settings, calling no LLM.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::Sample;
-use crate::engine::{Answer, AskError, Engine, Problem, Settings};
-use crate::llm::{ANTHROPIC_CONTEXT_WINDOW, BatchPoll, LlmClient, LlmRequest, Usage, with_retries};
+use crate::engine::{Answer, AskError, Engine, Problem, RepairKind, Settings};
+use crate::llm::{
+    ANTHROPIC_CONTEXT_WINDOW, BatchPoll, LlmClient, LlmError, LlmRequest, LlmResponse, Usage,
+    with_retries,
+};
 use crate::pricing;
 
 const RESULTS: &str = "results.jsonl";
+/// Written by `score.py`.
+const SCORES: &str = "scores.jsonl";
 const MANIFEST: &str = "manifest.json";
 /// Batches submitted for the run, so a later invocation collects them.
 const BATCHES: &str = "batches.json";
@@ -46,7 +53,8 @@ pub enum BenchError {
         path: PathBuf,
         source: serde_json::Error,
     },
-    /// The arm's knowledge is missing or broken, found before anything is asked.
+    /// The arm's knowledge is missing or broken, found before anything is
+    /// asked; in a replay, also the database being unavailable.
     #[error(transparent)]
     Knowledge(#[from] AskError),
     #[error("{path} line {line} is not a valid record: {source}")]
@@ -710,21 +718,36 @@ impl Key {
 /// without its newline is what a kill mid-write leaves behind: it is cut off
 /// so the sample is answered again. Any other bad line is an error.
 fn load_records(path: &Path) -> Result<Vec<Record>, BenchError> {
-    let io = |source| BenchError::Io {
-        path: path.to_path_buf(),
-        source,
-    };
+    let (records, complete) = read_records(path)?;
+    if let Some(complete) = complete {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_len(complete))
+            .map_err(|source| BenchError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(records)
+}
+
+/// The complete records in `path`, and the length of its complete lines when
+/// a final line is cut off.
+fn read_records(path: &Path) -> Result<(Vec<Record>, Option<u64>), BenchError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(io(e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+        Err(source) => {
+            return Err(BenchError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     };
     let complete = text.rfind('\n').map_or(0, |i| i + 1);
-    if complete < text.len() {
-        let file = OpenOptions::new().write(true).open(path).map_err(io)?;
-        file.set_len(complete as u64).map_err(io)?;
-    }
-    text[..complete]
+    let cut = (complete < text.len()).then_some(complete as u64);
+    let records = text[..complete]
         .lines()
         .enumerate()
         .map(|(i, line)| {
@@ -734,9 +757,141 @@ fn load_records(path: &Path) -> Result<Vec<Record>, BenchError> {
                 source,
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok((records, cut))
 }
 
 fn open_append(path: &Path) -> std::io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
+}
+
+/// The LLM of a replay: answers every call with the reply being replayed, so
+/// a repair gets the same reply again, at no cost. Its context window never
+/// overflows.
+#[derive(Default)]
+pub struct ReplayLlm {
+    reply: Mutex<String>,
+}
+
+impl LlmClient for ReplayLlm {
+    fn model(&self) -> &str {
+        "replay"
+    }
+
+    fn backend(&self) -> &str {
+        "replay"
+    }
+
+    fn endpoint(&self) -> &str {
+        "replay"
+    }
+
+    fn context_window(&self) -> u32 {
+        u32::MAX
+    }
+
+    async fn complete(&self, _: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        Ok(LlmResponse {
+            text: self.reply.lock().unwrap().clone(),
+            usage: Usage::default(),
+            truncated: false,
+        })
+    }
+
+    async fn submit_batch(&self, _: &[(String, LlmRequest)]) -> Result<String, LlmError> {
+        Err(LlmError::Other("a replay submits no batch".into()))
+    }
+
+    async fn poll_batch(&self, _: &str) -> Result<BatchPoll, LlmError> {
+        Err(LlmError::Other("a replay submits no batch".into()))
+    }
+}
+
+/// One recorded candidate, replayed.
+#[derive(Debug)]
+pub struct Replayed {
+    pub sample_id: String,
+    pub db_id: String,
+    pub candidate: u32,
+    /// The first repair or value correction the engine asks for, if any.
+    pub first_repair: Option<(RepairKind, Vec<Problem>)>,
+    /// The candidate's Soft-EX in the run's `scores.jsonl`, if scored.
+    pub soft_ex: Option<bool>,
+}
+
+/// Feeds each recorded reply to `samples` in `run_dir` to `engine`, as if
+/// the LLM had just given it, and reports what the engine's settings would
+/// repair. Candidates that were never sent (context overflow) are left out.
+/// Reads the run directory and writes nothing to it.
+pub async fn replay(
+    engine: &Engine<ReplayLlm>,
+    run_dir: &Path,
+    samples: &[Sample],
+) -> Result<Vec<Replayed>, BenchError> {
+    let (records, _) = read_records(&run_dir.join(RESULTS))?;
+    let scores = read_scores(&run_dir.join(SCORES))?;
+    let by_id: HashMap<&str, &Sample> = samples.iter().map(|s| (s.sample_id.as_str(), s)).collect();
+    let mut replayed = Vec::new();
+    for record in records {
+        let Some(sample) = by_id.get(record.sample_id.as_str()) else {
+            continue;
+        };
+        let kind = record.error.as_ref().map(|e| e.kind.as_str());
+        if kind == Some("skipped_context_overflow") {
+            continue;
+        }
+        *engine.llm().reply.lock().unwrap() = record.reply.clone();
+        let response = LlmResponse {
+            text: record.reply.clone(),
+            usage: Usage::default(),
+            truncated: kind == Some("truncated"),
+        };
+        let answer = engine.answer(sample, response, None).await?;
+        replayed.push(Replayed {
+            soft_ex: scores
+                .get(&(record.sample_id.clone(), record.candidate))
+                .copied(),
+            sample_id: record.sample_id,
+            db_id: record.db_id,
+            candidate: record.candidate,
+            first_repair: answer
+                .repairs
+                .into_iter()
+                .next()
+                .map(|r| (r.kind, r.problems)),
+        });
+    }
+    Ok(replayed)
+}
+
+/// Soft-EX per (sample, candidate) in `path`, none if it does not exist.
+fn read_scores(path: &Path) -> Result<HashMap<(String, u32), bool>, BenchError> {
+    #[derive(Deserialize)]
+    struct Score {
+        sample_id: String,
+        candidate: u32,
+        soft_ex: bool,
+    }
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(source) => {
+            return Err(BenchError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let score: Score =
+                serde_json::from_str(line).map_err(|source| BenchError::Corrupt {
+                    path: path.to_path_buf(),
+                    line: i + 1,
+                    source,
+                })?;
+            Ok(((score.sample_id, score.candidate), score.soft_ex))
+        })
+        .collect()
 }

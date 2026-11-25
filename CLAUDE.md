@@ -31,6 +31,8 @@ A ticket is done when CI is green on the pushed commit and the issue is closed w
 
 `mqlc ask` and `mqlc bench` spend real API credit. Smoke-test with `bench --limit 20` and run a full split only when the user asks for it. The first 20 dev questions are all one database (toxicology), so a smoke run checks the pipeline, never the baseline. `ANTHROPIC_API_KEY` stays in the environment only.
 
+To measure a new setting before paying for it, `mqlc replay <run-dir>` feeds a recorded train run's replies to the engine at no API cost. Replays and live runs query the local MongoDB under time limits: run each one alone, and run `scripts/ci.sh` after it finishes.
+
 ## Failures in a run
 
 When adding an LLM backend or any new failure path, classify each failure per `docs/adr/0011-infrastructure-failures-stop-the-run.md`: unavailable infrastructure stops the run unrecorded; anything the model produced is recorded and scores as wrong.
