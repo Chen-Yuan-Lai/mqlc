@@ -150,6 +150,37 @@ both repairs. On dev, the static check helps only when the first pipeline is
 wrong in a way the schema shows, under 2% of them; changing its feedback
 would be tuned on train (ADR 0006). The two runs cost USD 3.66 (#14).
 
+### Experiment E scores
+
+What `mqlc-mcp` adds to the official MongoDB MCP server when Claude Code is
+the host ([arms](#experiment-e), ADR 0015), on 300 dev questions drawn with
+`--draw 300 --seed 16`, Claude Code with Haiku 4.5, no schema in the prompt.
+Both ran at c217319 (`-dirty` for edits outside the code; the first 3
+questions of each at the same code before its commit). Cost is Claude Code's
+own list-price estimate; the runs used a Claude Code login, not the API. The
+baseline and the merge of #20 are scored on the same 300 questions.
+
+| Run | Exec-Rate | Soft-EX | vs mcp-official | p | Strict-EX | Tool calls per question | Cost (USD) |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| [official](runs/baseline-all/manifest.json) (the baseline, schema in the prompt) | 97.33 | 46.00 | | | 16.67 | | |
+| [official-auto-mdl](runs/c20-dev-official-auto-mdl/manifest.json) (the merge of #20) | 98.67 | 51.67 | | | 19.33 | | |
+| [mcp-official](runs/expE-dev-mcp-official/manifest.json) | 96.33 | 48.00 | | | 22.00 | 6.14 | 11.33 |
+| [mcp-official-mqlc](runs/expE-dev-mcp-official-mqlc/manifest.json) | 97.33 | **50.00** | +2.00 | 0.418 | 25.00 | 5.64 | 10.38 |
+
+Adding `mqlc-mcp` gains 2 points of Soft-EX (22 questions right against 16
+lost) and 3 of Strict-EX (p = 0.200): no measurable gain on 300 questions.
+The host seldom calls it: `profile_schema` on 15 questions and
+`validate_pipeline` once. It learns the schema from the official
+`collection-schema` (on 288 questions) and `find` instead. 11 of the 15 are
+right, against 10 in the other arm. Twice it called `profile_schema` under
+the official server's name, a tool that does not exist. With the database's
+own tools and no schema description, the host is 2 points of Soft-EX over
+the baseline (p = 0.550) and 5.3 of Strict-EX (p = 0.040). It is 3.7 under
+the merged auto MDL in the prompt (p = 0.200), for about 30 times the cost
+per question (that run is batch, at half price). No question ran out of
+turns; 8 and 3 replies did not parse, and 3 and 5 queries failed. The two runs cost USD 21.71 by that estimate
+(#16).
+
 ## Setup
 
 Requirements: Rust (stable), Docker Engine with the compose plugin, and
